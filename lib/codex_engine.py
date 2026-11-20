@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Core cross-platform orchestration & analytics engine for `antigravity-codex-bridge` (v1.1.0).
+Core cross-platform orchestration, Commander Relay, & analytics engine for `antigravity-codex-bridge` (v1.2.0).
 Zero third-party dependencies (Python 3.11+ standard library only).
 """
 
@@ -20,9 +20,11 @@ import subprocess
 import sys
 import time
 import tomllib
+import uuid
 from typing import Any, Callable, Optional
 
 PLUGIN_ROOT = pathlib.Path(__file__).resolve().parent.parent
+DEFAULT_WEB_PORT = int(os.environ.get("CODEX_BRIDGE_WEB_PORT") or 18765)
 
 
 def get_data_dir() -> pathlib.Path:
@@ -38,6 +40,14 @@ def get_history_file() -> pathlib.Path:
     return get_data_dir() / "dispatch_history.jsonl"
 
 
+def get_relay_inbox_file() -> pathlib.Path:
+    return get_data_dir() / "relay_inbox.jsonl"
+
+
+def get_relay_cursor_file() -> pathlib.Path:
+    return get_data_dir() / "relay_cursor.json"
+
+
 def get_pending_assignments_file() -> pathlib.Path:
     return get_data_dir() / "pending_assignments.json"
 
@@ -51,7 +61,6 @@ def state_db_path() -> pathlib.Path:
     home = codex_home()
     if (home / "state_5.sqlite").is_file():
         return home / "state_5.sqlite"
-    # Fallback to highest-numbered state_*.sqlite if future schema bumps
     candidates = sorted(home.glob("state_*.sqlite"), reverse=True)
     return candidates[0] if candidates else (home / "state_5.sqlite")
 
@@ -106,12 +115,10 @@ def path_is_within(child_key: str, parent_key: str) -> bool:
 
 def find_codex_exe() -> Optional[str]:
     """Locate the newest runnable `codex` binary across Windows, macOS, and Linux."""
-    # 1. Explicit environment override
     env_p = os.environ.get("CODEX_CLI_PATH")
     if env_p and pathlib.Path(env_p).is_file():
         return str(pathlib.Path(env_p))
 
-    # 2. ~/.codex/config.toml [mcp_servers.node_repl.env].CODEX_CLI_PATH (auto-maintained by Codex Desktop)
     cfg_file = config_toml_path()
     if cfg_file.is_file():
         try:
@@ -127,7 +134,6 @@ def find_codex_exe() -> Optional[str]:
         except Exception:
             pass
 
-    # 3. System PATH
     which_p = shutil.which("codex") or shutil.which("codex.exe")
     if which_p:
         return which_p
@@ -135,7 +141,6 @@ def find_codex_exe() -> Optional[str]:
     sys_name = platform.system()
     home = codex_home()
 
-    # 4. Platform-specific Desktop App / package locations
     if sys_name == "Windows":
         try:
             proc = subprocess.run(
@@ -161,25 +166,23 @@ def find_codex_exe() -> Optional[str]:
             return str(sb_win)
 
     elif sys_name == "Darwin":
-        mac_candidates = [
+        for c in [
             pathlib.Path("/Applications/Codex.app/Contents/Resources/codex"),
             pathlib.Path.home() / "Applications/Codex.app/Contents/Resources/codex",
             pathlib.Path("/opt/homebrew/bin/codex"),
             pathlib.Path("/usr/local/bin/codex"),
             home / ".sandbox-bin" / "codex",
-        ]
-        for c in mac_candidates:
+        ]:
             if c.is_file():
                 return str(c)
 
     else:
-        linux_candidates = [
+        for c in [
             pathlib.Path.home() / ".local/bin/codex",
             pathlib.Path.home() / ".npm-global/bin/codex",
             pathlib.Path("/usr/local/bin/codex"),
             home / ".sandbox-bin" / "codex",
-        ]
-        for c in linux_candidates:
+        ]:
             if c.is_file():
                 return str(c)
 
@@ -365,6 +368,280 @@ def fmt_tokens(n: Optional[int]) -> str:
     if val >= 1_000:
         return f"{val / 1_000:.1f}K"
     return str(val)
+
+
+# ---------------------------------------------------------------------------
+# Commander Feedback Analyzer & Mandatory Relay Inbox
+# ---------------------------------------------------------------------------
+
+QUESTION_PATTERNS = [
+    re.compile(r"(?:请问|请确认|需要你确认|请告诉我|你希望|是否需要|能否提供|请选择)[^\n。]{2,120}[？?]"),
+    re.compile(r"(?:Could you|Would you like|Please confirm|Please clarify|Should I|Which option)[^\n.]{2,140}\?", re.IGNORECASE),
+]
+
+
+def detect_questions_in_text(text: str) -> list[str]:
+    if not text:
+        return []
+    found: list[str] = []
+    for pat in QUESTION_PATTERNS:
+        for m in pat.findall(text):
+            cleaned = m.strip()
+            if cleaned not in found:
+                found.append(cleaned)
+    # Also check if the very last non-empty line ends with a question mark
+    tail_lines = [ln.strip() for ln in text.strip().splitlines() if ln.strip()]
+    if tail_lines and tail_lines[-1].endswith(("?", "？")) and len(tail_lines[-1]) <= 180:
+        if tail_lines[-1] not in found:
+            found.append(tail_lines[-1])
+    return found[:5]
+
+
+def build_commander_relay(
+    *,
+    thread_id: str,
+    title: Optional[str],
+    project_name: Optional[str],
+    cwd: str,
+    turn_status: str,
+    turn_error: Any,
+    final_reply: str,
+    commands: list[dict[str, Any]],
+    file_changes: list[dict[str, Any]],
+    elicited_questions: list[dict[str, Any]],
+    blocked_approvals: list[dict[str, Any]],
+    raw_report_path: Optional[str] = None,
+) -> dict[str, Any]:
+    """
+    Constructs a structured `commanderRelay` packet so Antigravity ALWAYS verifies,
+    translates, and relays Codex's completion or feedback to the user.
+    """
+    failed_cmds = [
+        {"command": c.get("command"), "exitCode": c.get("exitCode")}
+        for c in commands
+        if c.get("exitCode") not in (None, 0) or c.get("status") in ("failed", "declined")
+    ]
+    text_questions = detect_questions_in_text(final_reply)
+
+    if turn_error or turn_status in ("failed", "errored", "interrupted"):
+        outcome = "turn_failed"
+    elif elicited_questions:
+        outcome = "needs_clarification"
+    elif blocked_approvals:
+        outcome = "blocked_by_sandbox"
+    elif text_questions and not file_changes:
+        outcome = "needs_clarification"
+    elif failed_cmds:
+        outcome = "completed_with_command_errors"
+    else:
+        outcome = "completed_clean"
+
+    directives = {
+        "completed_clean": (
+            "MANDATORY RELAY: Cross-check `filesChanged` and `commands` against `finalReply`, then explain the result "
+            "to the user in clear, plain language and attach the verbatim `rawReportPath` link."
+        ),
+        "completed_with_command_errors": (
+            "MANDATORY RELAY: One or more commands exited non-zero (`failedCommands`). Inspect whether Codex recovered "
+            "or left an unresolved error; fix/follow-up via `--thread` if trivial, then explain clearly to the user."
+        ),
+        "needs_clarification": (
+            "MANDATORY RELAY: Codex raised follow-up questions (`elicitedQuestions` / `detectedQuestions`). "
+            "If answerable from workspace files, answer Codex directly via `dispatch --thread`; otherwise translate "
+            "the options into plain language for the user, collect their decision, and resume the thread."
+        ),
+        "blocked_by_sandbox": (
+            "MANDATORY RELAY: Codex requested write/command permissions (`blockedApprovals`) while in `read-only` sandbox. "
+            "Review the blocked action, explain what Codex wants to do in plain language, and ask the user whether to re-run with `workspace-write`."
+        ),
+        "turn_failed": (
+            "MANDATORY RELAY: Codex encountered a turn error (`turnError`). Diagnose the cause (e.g., quota, path, or tool error) "
+            "and explain clearly to the user with recommended next steps."
+        ),
+    }
+
+    return {
+        "mustRelayViaAntigravity": True,
+        "outcome": outcome,
+        "threadId": thread_id,
+        "title": title,
+        "projectName": project_name,
+        "cwd": cwd,
+        "filesChangedCount": len(file_changes),
+        "filesChanged": file_changes[:25],
+        "commandsExecutedCount": len(commands),
+        "failedCommands": failed_cmds[:10],
+        "elicitedQuestions": elicited_questions,
+        "detectedQuestions": text_questions,
+        "blockedApprovals": blocked_approvals,
+        "rawReportPath": raw_report_path,
+        "commanderDirective": directives[outcome],
+    }
+
+
+def enqueue_relay_item(relay: dict[str, Any], reply_preview: str) -> str:
+    """Record a newly completed or paused Codex turn into the Commander Relay Inbox."""
+    ensure_data_dirs()
+    relay_id = f"rly_{uuid.uuid4().hex[:10]}"
+    entry = {
+        "relayId": relay_id,
+        "createdAt": dt.datetime.now().isoformat(timespec="seconds"),
+        "relayed": False,
+        "threadId": relay["threadId"],
+        "title": relay.get("title"),
+        "projectName": relay.get("projectName"),
+        "outcome": relay["outcome"],
+        "filesChangedCount": relay.get("filesChangedCount", 0),
+        "failedCommandCount": len(relay.get("failedCommands") or []),
+        "questions": (relay.get("elicitedQuestions") or []) + (relay.get("detectedQuestions") or []),
+        "blockedApprovals": relay.get("blockedApprovals") or [],
+        "rawReportPath": relay.get("rawReportPath"),
+        "replyPreview": reply_preview[:300],
+        "commanderDirective": relay["commanderDirective"],
+    }
+    with get_relay_inbox_file().open("a", encoding="utf-8") as f:
+        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    return relay_id
+
+
+def check_relay_inbox(
+    include_relayed: bool = False,
+    detect_external_ui_turns: bool = True,
+    ack_ids: Optional[list[str]] = None,
+    ack_all: bool = False,
+) -> dict[str, Any]:
+    """
+    Inspect pending Codex completions/feedback awaiting Antigravity's relay to the user,
+    optionally acknowledging already-relayed items and detecting new turns from Codex Desktop UI.
+    """
+    ensure_data_dirs()
+    inbox_file = get_relay_inbox_file()
+    entries: list[dict[str, Any]] = []
+    if inbox_file.is_file():
+        for line in inbox_file.read_text(encoding="utf-8", errors="replace").splitlines():
+            if line.strip():
+                try:
+                    entries.append(json.loads(line))
+                except Exception:
+                    pass
+
+    ack_set = set(ack_ids or [])
+    mutated = False
+    for e in entries:
+        if ack_all or e.get("relayId") in ack_set or e.get("threadId") in ack_set:
+            if not e.get("relayed"):
+                e["relayed"] = True
+                e["relayedAt"] = dt.datetime.now().isoformat(timespec="seconds")
+                mutated = True
+
+    if mutated:
+        inbox_file.write_text(
+            "".join(json.dumps(x, ensure_ascii=False) + "\n" for x in entries),
+            encoding="utf-8",
+        )
+
+    external_updates: list[dict[str, Any]] = []
+    if detect_external_ui_turns and state_db_path().is_file():
+        cursor_file = get_relay_cursor_file()
+        last_seen_ms = 0
+        if cursor_file.is_file():
+            try:
+                last_seen_ms = int(json.loads(cursor_file.read_text(encoding="utf-8")).get("lastSeenUpdatedMs") or 0)
+            except Exception:
+                last_seen_ms = 0
+
+        recent_ui = list_threads(source_filter="ui", limit=10)
+        newest_ms = max((t["updatedAtMs"] for t in recent_ui), default=last_seen_ms)
+        if last_seen_ms == 0:
+            # Initialize watermark on first check
+            cursor_file.write_text(json.dumps({"lastSeenUpdatedMs": newest_ms}), encoding="utf-8")
+        else:
+            known_tids = {e.get("threadId") for e in entries if not e.get("relayed")}
+            for t in recent_ui:
+                if t["updatedAtMs"] > last_seen_ms and t["id"] not in known_tids:
+                    external_updates.append(
+                        {
+                            "threadId": t["id"],
+                            "title": t["title"],
+                            "projectName": t["projectName"],
+                            "updatedAt": t["updatedAt"],
+                            "note": "Updated externally in Codex Desktop UI; call `codex_bridge_digest_thread` to inspect and relay to the user.",
+                        }
+                    )
+            if ack_all and newest_ms > last_seen_ms:
+                cursor_file.write_text(json.dumps({"lastSeenUpdatedMs": newest_ms}), encoding="utf-8")
+
+    filtered = entries if include_relayed else [e for e in entries if not e.get("relayed")]
+    filtered.reverse()
+    return {
+        "pendingCount": sum(1 for e in entries if not e.get("relayed")),
+        "externalUiUpdatesCount": len(external_updates),
+        "items": filtered[:30],
+        "externalUiUpdates": external_updates,
+    }
+
+
+def digest_thread_for_relay(thread_id: str) -> dict[str, Any]:
+    """
+    Generate a structured `commanderRelay` verification digest from any existing Codex session
+    (ideal for relaying tasks executed in Codex Desktop UI or Web Console).
+    """
+    detail = read_thread(thread_id, max_messages=12, max_commands=30)
+    msgs = detail.get("recentMessages") or []
+    last_assistant = ""
+    last_user = ""
+    for m in reversed(msgs):
+        if m["role"] == "assistant" and not last_assistant:
+            last_assistant = m["text"]
+        elif m["role"] == "user" and not last_user:
+            last_user = m["text"]
+
+    pseudo_cmds = []
+    for tc in detail.get("recentToolCalls") or []:
+        out_prev = tc.get("outputPreview") or ""
+        failed = ("Exit code: 1" in out_prev) or ("Traceback" in out_prev) or ("error:" in out_prev.lower()[:200])
+        pseudo_cmds.append(
+            {
+                "command": f"{tc.get('tool')}: {str(tc.get('input'))[:200]}",
+                "exitCode": 1 if failed else 0,
+                "status": "failed" if failed else "completed",
+            }
+        )
+
+    relay = build_commander_relay(
+        thread_id=detail["id"],
+        title=detail["title"],
+        project_name=None,
+        cwd=detail["cwd"],
+        turn_status="completed",
+        turn_error=None,
+        final_reply=last_assistant,
+        commands=pseudo_cmds,
+        file_changes=[],
+        elicited_questions=[],
+        blocked_approvals=[],
+    )
+    return {
+        "thread": {
+            "id": detail["id"],
+            "title": detail["title"],
+            "cwd": detail["cwd"],
+            "model": detail["model"],
+            "tokensFormatted": detail["tokensFormatted"],
+            "updatedAt": detail["updatedAt"],
+        },
+        "lastUserPrompt": last_user,
+        "lastAssistantReply": last_assistant,
+        "recentReasoning": detail.get("recentReasoning") or [],
+        "recentToolCalls": (detail.get("recentToolCalls") or [])[-10:],
+        "subagents": detail.get("subagents") or [],
+        "commanderRelay": relay,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Projects & Threads Queries
+# ---------------------------------------------------------------------------
 
 
 def list_projects(query: Optional[str] = None, include_empty: bool = True) -> list[dict[str, Any]]:
@@ -893,17 +1170,22 @@ def get_dispatch_history(limit: int = 30) -> list[dict[str, Any]]:
 
 class AppServerClient:
     """
-    JSON-RPC 2.0 client over `codex app-server --stdio` declaring `clientInfo.name = "Codex Desktop"`
-    so newly created or forked sessions are 100% native Codex Desktop UI threads.
+    JSON-RPC 2.0 client over `codex app-server --stdio` declaring `clientInfo.name = "Codex Desktop"`.
+    Intercepts mid-turn `request_user_input` questions and sandbox approval escalations so every
+    feedback item routes cleanly back through Antigravity Commander.
     """
 
-    def __init__(self, codex_exe: Optional[str] = None):
+    def __init__(self, codex_exe: Optional[str] = None, sandbox_mode: str = "read-only"):
         self.exe = codex_exe or find_codex_exe()
         if not self.exe:
             raise RuntimeError("codex executable not found on this machine.")
+        self.sandbox_mode = sandbox_mode
         self.proc: Optional[subprocess.Popen[str]] = None
         self._next_id = 0
         self.notifications: list[dict[str, Any]] = []
+        self.elicited_questions: list[dict[str, Any]] = []
+        self.blocked_approvals: list[dict[str, Any]] = []
+        self.approval_events: list[dict[str, Any]] = []
 
     def __enter__(self) -> "AppServerClient":
         self.proc = subprocess.Popen(
@@ -922,7 +1204,7 @@ class AppServerClient:
                 "clientInfo": {
                     "name": "Codex Desktop",
                     "title": "Codex Desktop",
-                    "version": "1.1.0",
+                    "version": "1.2.0",
                 },
                 "capabilities": {"experimentalApi": True},
             },
@@ -949,6 +1231,80 @@ class AppServerClient:
 
     def notify(self, method: str, params: dict[str, Any]) -> None:
         self._send({"jsonrpc": "2.0", "method": method, "params": params})
+
+    def handle_server_callback(self, msg: dict[str, Any]) -> None:
+        """
+        Handle server-to-client requests (`item/tool/requestUserInput`, approvals, etc.)
+        so Codex feedback & permission boundaries always route back to Antigravity Commander.
+        """
+        req_id = msg["id"]
+        method = msg.get("method", "")
+        params = msg.get("params") or {}
+
+        # 1. Codex calls `request_user_input` mid-turn -> capture structured questions for Antigravity to relay!
+        if method == "item/tool/requestUserInput":
+            questions = params.get("questions") or []
+            answers_payload: dict[str, Any] = {}
+            for q in questions:
+                if isinstance(q, dict) and q.get("id"):
+                    self.elicited_questions.append(
+                        {
+                            "id": q.get("id"),
+                            "header": q.get("header"),
+                            "question": q.get("question"),
+                            "options": q.get("options") or [],
+                        }
+                    )
+                    answers_payload[q["id"]] = {
+                        "answers": [
+                            "[Deferred to Antigravity Commander: conclude safe read-only analysis now and summarize the exact options/inputs needed so Antigravity can consult the user and resume this session.]"
+                        ]
+                    }
+            self._send({"jsonrpc": "2.0", "id": req_id, "result": {"answers": answers_payload}})
+            return
+
+        # 2. Command / FileChange / Permissions approval callbacks -> enforce sandbox boundary!
+        if method in (
+            "item/commandExecution/requestApproval",
+            "execCommandApproval",
+            "item/fileChange/requestApproval",
+            "applyPatchApproval",
+            "item/permissions/requestApproval",
+        ):
+            is_readonly = self.sandbox_mode in ("read-only", "readOnly")
+            detail = {
+                "method": method,
+                "command": params.get("command"),
+                "reason": params.get("reason"),
+                "grantRoot": params.get("grantRoot"),
+            }
+            if is_readonly:
+                self.blocked_approvals.append(detail)
+                if method == "item/permissions/requestApproval":
+                    self._send({"jsonrpc": "2.0", "id": req_id, "result": {"permissions": {}, "scope": "turn"}})
+                else:
+                    self._send({"jsonrpc": "2.0", "id": req_id, "result": {"decision": "decline"}})
+            else:
+                self.approval_events.append(detail)
+                if method == "item/permissions/requestApproval":
+                    self._send(
+                        {
+                            "jsonrpc": "2.0",
+                            "id": req_id,
+                            "result": {"permissions": params.get("permissions") or {}, "scope": "turn"},
+                        }
+                    )
+                else:
+                    self._send({"jsonrpc": "2.0", "id": req_id, "result": {"decision": "accept"}})
+            return
+
+        # 3. MCP form elicitation fallback
+        if method == "mcpServer/elicitation/request":
+            self.elicited_questions.append({"id": "mcp_elicitation", "question": str(params.get("message") or params)})
+            self._send({"jsonrpc": "2.0", "id": req_id, "result": {"action": "cancel"}})
+            return
+
+        self._send({"jsonrpc": "2.0", "id": req_id, "error": {"code": -32601, "message": f"Unsupported callback: {method}"}})
 
     def request(
         self,
@@ -980,20 +1336,12 @@ class AppServerClient:
                     raise RuntimeError(f"RPC {method} error: {json.dumps(msg['error'], ensure_ascii=False)}")
                 return msg["result"]
             if "id" in msg and "method" in msg:
-                self._auto_respond_server_request(msg)
+                self.handle_server_callback(msg)
                 continue
             if "method" in msg:
                 self.notifications.append(msg)
                 if on_notification:
                     on_notification(msg["method"], msg.get("params") or {})
-
-    def _auto_respond_server_request(self, msg: dict[str, Any]) -> None:
-        req_id = msg["id"]
-        m = msg.get("method", "")
-        if "Approval" in m or "approval" in m:
-            self._send({"jsonrpc": "2.0", "id": req_id, "result": {"decision": "accept"}})
-        else:
-            self._send({"jsonrpc": "2.0", "id": req_id, "error": {"code": -32601, "message": f"Unsupported client callback: {m}"}})
 
     def stream_until_turn_complete(
         self,
@@ -1004,6 +1352,9 @@ class AppServerClient:
         agent_chunks: list[str] = []
         completed_messages: list[str] = []
         commands_ran: list[dict[str, Any]] = []
+        file_changes: list[dict[str, Any]] = []
+        mcp_calls: list[dict[str, Any]] = []
+        plan_steps: list[dict[str, Any]] = []
         reasoning_chunks: list[str] = []
         token_usage: dict[str, Any] = {}
         turn_result: dict[str, Any] = {}
@@ -1017,7 +1368,7 @@ class AppServerClient:
                 continue
             msg = json.loads(line)
             if "id" in msg and "method" in msg:
-                self._auto_respond_server_request(msg)
+                self.handle_server_callback(msg)
                 continue
 
             method = msg.get("method", "")
@@ -1027,6 +1378,8 @@ class AppServerClient:
                 agent_chunks.append(params.get("delta") or "")
             elif method == "item/reasoning/summaryTextDelta":
                 reasoning_chunks.append(params.get("delta") or "")
+            elif method == "turn/plan/updated":
+                plan_steps = params.get("plan") or plan_steps
             elif method == "item/started":
                 item = params.get("item") or {}
                 itype = item.get("type")
@@ -1052,6 +1405,24 @@ class AppServerClient:
                             "aggregatedOutput": (item.get("aggregatedOutput") or "")[:2000],
                         }
                     )
+                elif itype == "fileChange":
+                    for ch in item.get("changes") or []:
+                        if isinstance(ch, dict):
+                            file_changes.append(
+                                {
+                                    "path": ch.get("path"),
+                                    "kind": ch.get("kind"),
+                                    "status": item.get("status"),
+                                }
+                            )
+                elif itype == "mcpToolCall":
+                    mcp_calls.append(
+                        {
+                            "server": item.get("server"),
+                            "tool": item.get("tool"),
+                            "status": item.get("status"),
+                        }
+                    )
             elif method == "thread/tokenUsage/updated":
                 token_usage = params.get("tokenUsage") or token_usage
             elif method == "error":
@@ -1069,6 +1440,11 @@ class AppServerClient:
             "allMessages": completed_messages,
             "reasoningSummary": "".join(reasoning_chunks).strip(),
             "commands": commands_ran,
+            "fileChanges": file_changes,
+            "mcpCalls": mcp_calls,
+            "planSteps": plan_steps,
+            "elicitedQuestions": list(self.elicited_questions),
+            "blockedApprovals": list(self.blocked_approvals),
             "tokenUsage": token_usage,
             "turnStatus": turn_result.get("status", "completed"),
             "turnError": turn_result.get("error"),
@@ -1135,17 +1511,19 @@ def get_quota_and_models(include_models: bool = True) -> dict[str, Any]:
 
 
 def get_overview_stats(include_live_quota: bool = False) -> dict[str, Any]:
-    """Compute comprehensive usage, project, model, timeline, and bridge dispatch statistics."""
+    """Compute comprehensive usage, project, model, timeline, inbox, and bridge dispatch statistics."""
     codex_exe = find_codex_exe()
     version = get_codex_version(codex_exe)
     desktop_open = is_desktop_running()
     projects = list_projects(include_empty=True)
+    inbox_summary = check_relay_inbox(include_relayed=False, detect_external_ui_turns=False)
 
     stats: dict[str, Any] = {
         "codexExe": codex_exe,
         "codexVersion": version,
         "codexHome": str(codex_home()),
         "desktopRunning": desktop_open,
+        "defaultWebPort": DEFAULT_WEB_PORT,
         "projectCount": len(projects),
         "activeProjectCount": sum(1 for p in projects if (p["uiThreadCount"] + p["execThreadCount"]) > 0),
         "threads": {"total": 0, "ui": 0, "exec": 0, "subagent": 0, "archived": 0},
@@ -1155,6 +1533,7 @@ def get_overview_stats(include_live_quota: bool = False) -> dict[str, Any]:
         "dailyActivity": [],
         "hiddenExecThreads": [],
         "recentUiThreads": [],
+        "pendingRelayCount": inbox_summary["pendingCount"],
         "bridgeDispatches": {
             "total": 0,
             "completed": 0,
@@ -1291,11 +1670,11 @@ def create_ui_thread(
         raise ValueError(f"Working directory does not exist: {use_cwd}")
 
     sb_str = _to_sandbox_mode_str(sandbox)
-    with AppServerClient() as client:
+    with AppServerClient(sandbox_mode=sb_str) as client:
         start_params: dict[str, Any] = {
             "cwd": use_cwd,
             "sandbox": sb_str,
-            "approvalPolicy": "never",
+            "approvalPolicy": "on-request" if sb_str == "read-only" else "never",
             "ephemeral": False,
         }
         if model:
@@ -1341,12 +1720,12 @@ def fork_ui_thread(
     use_cwd = normalize_fs_path(cwd) if cwd else (resolved.get("cwd") or orig["cwd"])
     sb_str = _to_sandbox_mode_str(sandbox)
 
-    with AppServerClient() as client:
+    with AppServerClient(sandbox_mode=sb_str) as client:
         fork_params: dict[str, Any] = {
             "threadId": orig["id"],
             "cwd": use_cwd,
             "sandbox": sb_str,
-            "approvalPolicy": "never",
+            "approvalPolicy": "on-request" if sb_str == "read-only" else "never",
             "ephemeral": False,
         }
         if model:
@@ -1383,18 +1762,21 @@ def dispatch_task(
     model: Optional[str] = None,
     effort: Optional[str] = None,
     images: Optional[list[str]] = None,
+    output_schema: Optional[dict[str, Any]] = None,
     output_file: Optional[str] = None,
+    auto_ack_relay: bool = False,
     on_progress: Optional[Callable[[str], None]] = None,
 ) -> dict[str, Any]:
     """
-    Full native orchestration turn:
-    1. Creates a new Codex Desktop UI-visible thread, forks `fork_from`, OR resumes `thread_id`.
-    2. Runs the prompt via `codex app-server` (`turn/start`) with real-time progress.
-    3. Saves a complete raw report `.md` file and logs dispatch metrics.
+    Full native orchestration turn with mandatory Commander Relay packaging:
+    1. Creates, forks, or resumes a native Codex Desktop UI-visible thread.
+    2. Runs the prompt via `codex app-server` (`turn/start`), intercepting mid-turn questions & escalations.
+    3. Builds a structured `commanderRelay` verification digest, logs to Relay Inbox, and writes the verbatim `.md` report.
     """
     ensure_data_dirs()
     started_ts = time.time()
     sb_str = _to_sandbox_mode_str(sandbox)
+    approval_policy = "on-request" if sb_str == "read-only" else "never"
 
     resolved = (
         resolve_project(project or cwd)
@@ -1403,7 +1785,7 @@ def dispatch_task(
     )
     use_cwd = normalize_fs_path(cwd) if cwd else (resolved.get("cwd") or "")
 
-    with AppServerClient() as client:
+    with AppServerClient(sandbox_mode=sb_str) as client:
         created_new = False
         if fork_from:
             orig = read_thread(fork_from, max_messages=1, max_commands=0)
@@ -1411,7 +1793,7 @@ def dispatch_task(
                 use_cwd = orig["cwd"]
             res = client.request(
                 "thread/fork",
-                {"threadId": orig["id"], "cwd": use_cwd, "sandbox": sb_str, "approvalPolicy": "never", "ephemeral": False},
+                {"threadId": orig["id"], "cwd": use_cwd, "sandbox": sb_str, "approvalPolicy": approval_policy, "ephemeral": False},
             )
             thread_obj = res.get("thread") or {}
             tid = thread_obj.get("id")
@@ -1434,7 +1816,7 @@ def dispatch_task(
             start_params: dict[str, Any] = {
                 "cwd": use_cwd,
                 "sandbox": sb_str,
-                "approvalPolicy": "never",
+                "approvalPolicy": approval_policy,
                 "ephemeral": False,
             }
             if model:
@@ -1457,7 +1839,7 @@ def dispatch_task(
         turn_params: dict[str, Any] = {
             "threadId": tid,
             "input": user_inputs,
-            "approvalPolicy": "never",
+            "approvalPolicy": approval_policy,
             "sandboxPolicy": _to_sandbox_policy(sandbox, use_cwd),
         }
         if use_cwd:
@@ -1466,6 +1848,8 @@ def dispatch_task(
             turn_params["model"] = model
         if effort:
             turn_params["effort"] = effort
+        if output_schema:
+            turn_params["outputSchema"] = output_schema
 
         client.request("turn/start", turn_params)
         turn_out = client.stream_until_turn_complete(tid, on_progress=on_progress)
@@ -1477,11 +1861,28 @@ def dispatch_task(
     raw_md_path = pathlib.Path(output_file) if output_file else (get_logs_dir() / f"{stamp}_{tid[:8]}.md")
     raw_md_path.parent.mkdir(parents=True, exist_ok=True)
 
+    relay = build_commander_relay(
+        thread_id=tid,
+        title=title,
+        project_name=resolved.get("projectName"),
+        cwd=use_cwd,
+        turn_status=turn_out["turnStatus"],
+        turn_error=turn_out["turnError"],
+        final_reply=turn_out["finalReply"],
+        commands=turn_out["commands"],
+        file_changes=turn_out["fileChanges"],
+        elicited_questions=turn_out["elicitedQuestions"],
+        blocked_approvals=turn_out["blockedApprovals"],
+        raw_report_path=str(raw_md_path),
+    )
+
     cmd_lines = []
     for i, c in enumerate(turn_out["commands"], 1):
         cmd_lines.append(f"### {i}. `{c.get('command')}` (exit={c.get('exitCode')}, status={c.get('status')})")
         if c.get("aggregatedOutput"):
             cmd_lines.append(f"```text\n{c['aggregatedOutput'].strip()}\n```")
+
+    fchange_lines = [f"- `{fc.get('kind')}`: `{fc.get('path')}`" for fc in turn_out["fileChanges"]]
 
     md_report = "\n".join(
         [
@@ -1491,7 +1892,7 @@ def dispatch_task(
             f"- **Project**: {resolved.get('projectName') or 'Auto/Directory'} (`{use_cwd}`)",
             f"- **Thread UUID**: `{tid}` (Native Codex Desktop UI visible: `source=vscode`)",
             f"- **Model**: `{res.get('model') or model or 'default'}` | **Sandbox**: `{sb_str}` | **Duration**: `{elapsed_sec}s`",
-            f"- **Turn Status**: `{turn_out['turnStatus']}`",
+            f"- **Turn Status**: `{turn_out['turnStatus']}` | **Relay Outcome**: `{relay['outcome']}`",
             "",
             "## 1. Instruction Sent by Antigravity",
             "```text",
@@ -1501,18 +1902,27 @@ def dispatch_task(
             "## 2. Reasoning Summary",
             turn_out["reasoningSummary"] or "_No public reasoning summary emitted._",
             "",
-            f"## 3. Commands Executed ({len(turn_out['commands'])})",
+            f"## 3. Files Modified ({len(fchange_lines)})",
+            "\n".join(fchange_lines) if fchange_lines else "_No workspace files modified._",
+            "",
+            f"## 4. Commands Executed ({len(turn_out['commands'])})",
             "\n\n".join(cmd_lines) if cmd_lines else "_No shell commands executed in this turn._",
             "",
-            "## 4. Verbatim Codex Reply",
+            "## 5. Verbatim Codex Reply",
             turn_out["finalReply"] or "_Empty reply._",
             "",
         ]
     )
     raw_md_path.write_text(md_report, encoding="utf-8")
 
+    relay_id = enqueue_relay_item(relay, turn_out["finalReply"] or "")
+    if auto_ack_relay:
+        check_relay_inbox(ack_ids=[relay_id], detect_external_ui_turns=False)
+    relay["relayId"] = relay_id
+
     record = {
         "timestamp": dt.datetime.now().isoformat(timespec="seconds"),
+        "relayId": relay_id,
         "threadId": tid,
         "createdNew": created_new,
         "title": title,
@@ -1522,8 +1932,10 @@ def dispatch_task(
         "sandbox": sb_str,
         "model": res.get("model") or model,
         "status": turn_out["turnStatus"],
+        "outcome": relay["outcome"],
         "durationSec": elapsed_sec,
         "commandCount": len(turn_out["commands"]),
+        "filesChangedCount": len(turn_out["fileChanges"]),
         "rawReportPath": str(raw_md_path),
         "promptPreview": prompt.strip()[:160],
         "replyPreview": (turn_out["finalReply"] or "")[:240],
@@ -1536,8 +1948,10 @@ def dispatch_task(
         "finalReply": turn_out["finalReply"],
         "reasoningSummary": turn_out["reasoningSummary"],
         "commands": turn_out["commands"],
+        "fileChanges": turn_out["fileChanges"],
         "turnError": turn_out["turnError"],
         "projectBinding": binding,
+        "commanderRelay": relay,
     }
 
 
@@ -1550,7 +1964,11 @@ def run_code_review(
     model: Optional[str] = None,
 ) -> dict[str, Any]:
     """Run an independent UI-synced adversarial Code Review in Codex."""
-    target_desc = f"commit `{commit_sha}`" if commit_sha else (f"diff against base branch `{base_branch}`" if base_branch else "current uncommitted working-tree & staged Git changes (and recent commit context)")
+    target_desc = (
+        f"commit `{commit_sha}`"
+        if commit_sha
+        else (f"diff against base branch `{base_branch}`" if base_branch else "current uncommitted working-tree & staged Git changes (and recent commit context)")
+    )
     review_prompt = "\n".join(
         [
             f"Perform an independent, rigorous Code Review on {target_desc}.",
@@ -1574,10 +1992,7 @@ def run_code_review(
 
 
 def batch_dispatch(tasks: list[dict[str, Any]], max_workers: int = 3) -> dict[str, Any]:
-    """
-    Execute multiple UI-synced Codex tasks in parallel (e.g., multi-angle audits or parameter sweeps).
-    Each item in `tasks` accepts `{prompt, project, cwd, title, sandbox, model, effort, forkFrom}`.
-    """
+    """Execute multiple UI-synced Codex tasks in parallel and collect their `commanderRelay` digests."""
     started = time.time()
     results: list[dict[str, Any]] = [{}] * len(tasks)
 
@@ -1605,6 +2020,8 @@ def batch_dispatch(tasks: list[dict[str, Any]], max_workers: int = 3) -> dict[st
             results[i] = res
 
     return {
+        "mustRelayViaAntigravity": True,
+        "commanderDirective": "Synthesize all parallel Codex branch results, compare trade-offs, and present a unified recommendation to the user.",
         "totalTasks": len(tasks),
         "succeeded": sum(1 for r in results if r.get("ok")),
         "elapsedSec": round(time.time() - started, 1),
@@ -1747,5 +2164,6 @@ def run_doctor() -> dict[str, Any]:
     return {
         "healthy": all(c["ok"] for c in checks[:5]),
         "desktopRunning": is_desktop_running(),
+        "defaultWebPort": DEFAULT_WEB_PORT,
         "checks": checks,
     }

@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Live Interactive Local Web Control Center for `antigravity-codex-bridge` (v1.1.0).
-Provides real-time browsing of projects & raw thread transcripts, live quota & model picker,
-1-click session forking, Markdown report export, `exec` promotion, and direct UI-synced dispatch.
+Live Interactive Local Web Control Center for `antigravity-codex-bridge` (v1.2.0).
+Default port: `18765` (with automatic next-free-port fallback `18765..18799` so it never collides).
+Includes real-time Commander Relay Inbox & 1-click handoff back to Antigravity for plain-language interpretation!
 """
 
 from __future__ import annotations
 
 import json
 import pathlib
+import socket
 import sys
 import threading
 import urllib.parse
@@ -23,12 +24,25 @@ import codex_engine as engine  # noqa: E402
 
 ACTIVE_JOBS: dict[str, dict[str, Any]] = {}
 
+
+def pick_available_port(host: str, preferred_port: int, auto_port: bool = True, max_tries: int = 35) -> int:
+    ports = [preferred_port] + (list(range(preferred_port + 1, preferred_port + max_tries)) if auto_port else [])
+    for port in ports:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            try:
+                s.bind((host, port))
+                return port
+            except OSError:
+                continue
+    raise RuntimeError(f"Could not find an available TCP port starting at {preferred_port} on {host}.")
+
+
 WEB_HTML = r"""<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Codex Bridge v1.1 Live Console</title>
+  <title>Codex Bridge v1.2 Live Console</title>
   <style>
     :root {
       --bg: #0b0f19; --card: #131a2a; --border: #232f46; --fg: #e5ecff; --muted: #8ea0c0;
@@ -48,6 +62,7 @@ WEB_HTML = r"""<!DOCTYPE html>
     input, select, textarea { width: 100%; background: var(--code); color: var(--fg); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; font-size: 12px; outline: none; }
     button { background: var(--primary); color: #fff; border: none; border-radius: 8px; padding: 7px 12px; font-size: 12px; font-weight: 600; cursor: pointer; }
     button.ghost { background: transparent; border: 1px solid var(--border); color: var(--fg); }
+    button.relay { background: var(--success); color: #052e16; font-weight: 700; }
     button:hover { opacity: 0.92; }
     .list { max-height: 560px; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; margin-top: 10px; }
     .item { padding: 9px 10px; border-radius: 8px; border: 1px solid transparent; cursor: pointer; background: rgba(255,255,255,0.02); }
@@ -55,6 +70,7 @@ WEB_HTML = r"""<!DOCTYPE html>
     .msg { padding: 10px 12px; border-radius: 8px; border: 1px solid var(--border); margin-bottom: 8px; white-space: pre-wrap; line-height: 1.5; }
     .msg.user { border-left: 3px solid var(--primary); }
     .msg.assistant { border-left: 3px solid var(--success); background: rgba(16,185,129,0.04); }
+    .relay-bar { padding: 10px 12px; border-radius: 10px; border: 1px solid rgba(16,185,129,0.45); background: rgba(16,185,129,0.08); margin-bottom: 12px; display: flex; align-items: center; justify-content: space-between; gap: 10px; }
     pre { background: var(--code); padding: 10px; border-radius: 8px; overflow-x: auto; border: 1px solid var(--border); font-size: 11.5px; }
   </style>
 </head>
@@ -62,11 +78,13 @@ WEB_HTML = r"""<!DOCTYPE html>
   <header>
     <div class="brand">
       <span class="dot"></span>
-      <span>Codex Bridge v1.1 · 实时交互控制台</span>
+      <span>Codex Bridge v1.2 · 实时交互控制台</span>
       <span id="ver" class="badge">加载中...</span>
       <span id="quota-badge" class="badge" style="display:none;"></span>
+      <span id="inbox-badge" class="badge" style="display:none; border-color:#10b981; color:#10b981;"></span>
     </div>
     <div style="display:flex; gap:8px;">
+      <button class="relay" onclick="copyInboxRelayPrompt()">📨 让 Antigravity 转达最新反馈</button>
       <button class="ghost" onclick="promoteExec()">一键转正隐藏 Exec</button>
       <button onclick="openNewModal()">+ 新建 UI 同步任务</button>
       <button class="ghost" onclick="loadAll()">刷新</button>
@@ -95,15 +113,22 @@ WEB_HTML = r"""<!DOCTYPE html>
 
     <div class="card" id="detail-pane">
       <div id="empty-hint" class="muted" style="padding:40px 20px; text-align:center;">
-        点击左侧任意会话即可实时读取它的原始对话、思维摘要与执行的每一条底层命令；支持一键派生新分支（Fork）或导出 Markdown 报告。
+        点击左侧任意会话即可实时读取原始问答与底层命令；任务完成或有新反馈时，可一键交回 Antigravity 为你通俗解读与把关。
       </div>
       <div id="thr-detail" style="display:none;">
+        <div class="relay-bar">
+          <div>
+            <div style="font-weight:700; color:#34d399;">🧭 总工转达闭环 (Commander Relay)</div>
+            <div class="muted" style="margin-top:2px;">Codex 的原始输出或追问可一键交给 Antigravity 核验命令退出码、解读专业术语并给出下一步决策建议。</div>
+          </div>
+          <button class="relay" onclick="copyThreadRelayPrompt()">交由 Antigravity 解读转达</button>
+        </div>
         <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:12px; border-bottom:1px solid var(--border); padding-bottom:10px; margin-bottom:12px;">
           <div>
             <div id="d-title" style="font-size:15px; font-weight:700;"></div>
             <div id="d-meta" class="muted" style="margin-top:4px; font-family:monospace;"></div>
           </div>
-          <div style="display:flex; gap:6px; shrink:0;">
+          <div style="display:flex; gap:6px; flex-shrink:0;">
             <button class="ghost" onclick="forkCurrent()">派生分支 (Fork)</button>
             <button class="ghost" onclick="exportCurrent()">导出 MD</button>
             <button onclick="openFollowup()">追加指令</button>
@@ -116,7 +141,7 @@ WEB_HTML = r"""<!DOCTYPE html>
             <button onclick="submitDispatch(window.__curTid)">立即发送执行</button>
           </div>
         </div>
-        <div id="d-body" style="max-height:600px; overflow-y:auto;"></div>
+        <div id="d-body" style="max-height:560px; overflow-y:auto;"></div>
       </div>
 
       <div id="new-modal" style="display:none;">
@@ -127,7 +152,7 @@ WEB_HTML = r"""<!DOCTYPE html>
           <div><label class="muted">权限沙盒</label><select id="nm-sb"><option value="read-only">只读分析 (read-only)</option><option value="workspace-write">允许改写项目文件 (workspace-write)</option></select></div>
         </div>
         <div style="margin-bottom:10px;"><label class="muted">会话标题 (直接显示在 Codex UI 左侧栏)</label><input id="nm-title" placeholder="例如：[AGY] 模块重构与边界检查" /></div>
-        <div style="margin-bottom:10px;"><label class="muted">执行指令</label><textarea id="nm-prompt" rows="5" placeholder="输入详细任务指令..."></textarea></div>
+        <div style="margin-bottom:10px;"><label class="muted">执行指令</label><textarea id="nm-prompt" rows="5" placeholder="输入详细任务指令（运行完成后会自动进入 Antigravity 待转达收件箱）..."></textarea></div>
         <button onclick="submitDispatch(null)">创建 UI 会话并后台启动</button>
         <div id="nm-status" class="muted" style="margin-top:10px;"></div>
       </div>
@@ -145,6 +170,14 @@ WEB_HTML = r"""<!DOCTYPE html>
       document.getElementById('k-proj').textContent = ov.projectCount;
       document.getElementById('k-ui').textContent = ov.threads.ui;
       document.getElementById('k-tok').textContent = ov.tokens.totalFormatted;
+
+      const ib = document.getElementById('inbox-badge');
+      if (ov.pendingRelayCount > 0) {
+        ib.style.display = 'inline-block';
+        ib.textContent = `${ov.pendingRelayCount} 条待转达结果`;
+      } else {
+        ib.style.display = 'none';
+      }
 
       const qt = await api('/api/quota');
       if (qt && qt.available && qt.primaryWindow && qt.primaryWindow.remainingPercent != null) {
@@ -197,6 +230,7 @@ WEB_HTML = r"""<!DOCTYPE html>
       document.getElementById('thr-detail').style.display = 'block';
       document.getElementById('d-body').innerHTML = '<div class="muted">正在读取原始日志...</div>';
       const d = await api(`/api/thread?id=${encodeURIComponent(tid)}`);
+      window.__curTitle = d.title;
       document.getElementById('d-title').textContent = d.title;
       document.getElementById('d-meta').textContent = `UUID: ${d.id} | 目录: ${d.cwd} | 模型: ${d.model} | 来源: ${d.source} | Token: ${d.tokensFormatted}`;
       let html = '';
@@ -213,6 +247,15 @@ WEB_HTML = r"""<!DOCTYPE html>
       }
       document.getElementById('d-body').innerHTML = html || '<div class="muted">该会话暂无消息内容。</div>';
       loadThreads();
+    }
+    function copyInboxRelayPrompt() {
+      navigator.clipboard.writeText('请调用 codex_bridge_relay_inbox 检查我最新的 Codex 完成结果或待确认反馈，核验后用通俗中文转达给我。')
+        .then(() => alert('已复制！粘贴发送给 Antigravity 即可由它统一核验并向你转达最新进展。'));
+    }
+    function copyThreadRelayPrompt() {
+      if (!window.__curTid) return;
+      navigator.clipboard.writeText(`请调用 codex_bridge_digest_thread 核验并解读 Codex 会话 ${window.__curTid}（${window.__curTitle || ''}）的最新完成情况或追问反馈，用通俗中文转达给我并给出下一步建议。`)
+        .then(() => alert('已复制该会话的转达指令！粘贴到 Antigravity 聊天框发送即可。'));
     }
     function escapeHtml(s) {
       return String(s||'').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -263,7 +306,7 @@ WEB_HTML = r"""<!DOCTYPE html>
       };
       if (!payload.prompt || !payload.prompt.trim()) return alert('请输入指令内容');
       const st = document.getElementById('nm-status');
-      if (st) st.textContent = '已提交后台执行，正在运行...';
+      if (st) st.textContent = '已提交后台执行，完成后将自动写入 Antigravity 待转达收件箱...';
       const res = await api('/api/dispatch', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)});
       if (res.jobId) pollJob(res.jobId);
     }
@@ -313,6 +356,8 @@ class BridgeRequestHandler(BaseHTTPRequestHandler):
                 return
             if parsed.path == "/api/overview":
                 return self._send_json(engine.get_overview_stats(include_live_quota=False))
+            if parsed.path == "/api/inbox":
+                return self._send_json(engine.check_relay_inbox())
             if parsed.path == "/api/quota":
                 return self._send_json(engine.get_quota_and_models(include_models=True))
             if parsed.path == "/api/projects":
@@ -371,9 +416,17 @@ class BridgeRequestHandler(BaseHTTPRequestHandler):
             self._send_json({"error": str(e)}, 500)
 
 
-def run_server(host: str = "127.0.0.1", port: int = 8765) -> None:
-    srv = ThreadingHTTPServer((host, port), BridgeRequestHandler)
-    print(f"Codex Bridge Live Console listening on http://{host}:{port}", flush=True)
+def run_server(host: str = "127.0.0.1", port: int = engine.DEFAULT_WEB_PORT, auto_port: bool = True) -> None:
+    actual_port = pick_available_port(host, port, auto_port=auto_port)
+    srv = ThreadingHTTPServer((host, actual_port), BridgeRequestHandler)
+    info = {
+        "service": "codex-bridge-web-console",
+        "version": "1.2.0",
+        "url": f"http://{host}:{actual_port}",
+        "port": actual_port,
+        "requestedPort": port,
+    }
+    print(json.dumps(info, ensure_ascii=False), flush=True)
     srv.serve_forever()
 
 

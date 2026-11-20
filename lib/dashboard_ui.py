@@ -42,7 +42,7 @@ def build_inline_widget_html(stats: dict[str, Any] | None = None, include_live_q
     <div class="flex flex-wrap items-center justify-between gap-2 pb-2 border-b border-[var(--card-border)] text-xs">
       <div class="flex items-center gap-2">
         <span class="inline-block w-2 h-2 rounded-full" style="background: var(--success)"></span>
-        <span class="font-semibold text-[var(--foreground)]">Codex Bridge v1.1</span>
+        <span class="font-semibold text-[var(--foreground)]">Codex Bridge v1.2</span>
         <span id="ver" class="font-mono text-[var(--muted-foreground)]"></span>
       </div>
       <div class="flex items-center gap-2">
@@ -215,7 +215,7 @@ def build_full_dashboard_html(include_live_quota: bool = True) -> str:
       <div>
         <div class="flex items-center gap-2.5">
           <span class="inline-block w-2.5 h-2.5 rounded-full" style="background: var(--success)"></span>
-          <h1 class="text-lg font-bold tracking-tight">Codex Bridge v1.1 · 全局控制与统计中心</h1>
+          <h1 class="text-lg font-bold tracking-tight">Codex Bridge v1.2 · 全局控制与统计中心</h1>
           <span id="hdr-ver" class="text-xs font-mono px-2 py-0.5 rounded bg-[var(--card)] border border-[var(--border)] text-[var(--muted-foreground)]"></span>
         </div>
         <p class="text-xs text-[var(--muted-foreground)] mt-1">

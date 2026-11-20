@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Zero-dependency Model Context Protocol (MCP) Stdio Server for `antigravity-codex-bridge` (v1.1.0).
-Supports MCP protocol versions 2024-11-05, 2025-03-26, and 2025-06-18 over newline-delimited JSON-RPC 2.0
-(with automatic Content-Length header framing fallback).
+Zero-dependency Model Context Protocol (MCP) Stdio Server for `antigravity-codex-bridge` (v1.2.0).
+Exposes 13 native tools including Commander Relay Inbox & Structured Thread Verification Digest.
 """
 
 from __future__ import annotations
@@ -32,7 +31,7 @@ TOOLS: list[dict[str, Any]] = [
         "name": "codex_bridge_overview",
         "description": (
             "Get comprehensive Codex installation health, project count, UI vs hidden exec session counts, "
-            "model token usage breakdown, daily activity timeline, Antigravity dispatch history, and optional live quota."
+            "pending Commander Relay inbox count, model token breakdown, daily activity, and optional live quota."
         ),
         "inputSchema": {
             "type": "object",
@@ -40,9 +39,57 @@ TOOLS: list[dict[str, Any]] = [
                 "includeLiveQuota": {
                     "type": "boolean",
                     "default": False,
-                    "description": "Also query `codex app-server` for live account rate-limit % and model list.",
                 }
             },
+        },
+    },
+    {
+        "name": "codex_bridge_relay_inbox",
+        "description": (
+            "Inspect pending Codex task completions, questions, or external Codex Desktop UI updates that "
+            "MUST be verified, interpreted, and relayed by Antigravity to the user. Pass `ackIds` or `ackAll=true` "
+            "after relaying to mark items as handled."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "includeRelayed": {
+                    "type": "boolean",
+                    "default": False,
+                },
+                "detectExternalUiTurns": {
+                    "type": "boolean",
+                    "default": True,
+                    "description": "Also surface threads updated directly inside Codex Desktop UI since last check.",
+                },
+                "ackIds": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "List of `relayId` or `threadId` values to mark as relayed to the user.",
+                },
+                "ackAll": {
+                    "type": "boolean",
+                    "default": False,
+                },
+            },
+        },
+    },
+    {
+        "name": "codex_bridge_digest_thread",
+        "description": (
+            "Produce a structured Commander Relay verification digest (`commanderRelay`) for any Codex thread, "
+            "extracting latest prompt, verbatim reply, reasoning, failed commands, and follow-up questions so "
+            "Antigravity can accurately translate and relay Codex's work to the user."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "threadId": {
+                    "type": "string",
+                    "description": "Full UUID or unique prefix of the Codex thread.",
+                }
+            },
+            "required": ["threadId"],
         },
     },
     {
@@ -72,18 +119,9 @@ TOOLS: list[dict[str, Any]] = [
         "inputSchema": {
             "type": "object",
             "properties": {
-                "query": {
-                    "type": "string",
-                    "description": "Optional case-insensitive filter matching project name, ID, or folder path.",
-                },
-                "includeEmpty": {
-                    "type": "boolean",
-                    "default": True,
-                },
-                "limit": {
-                    "type": "integer",
-                    "default": 40,
-                },
+                "query": {"type": "string"},
+                "includeEmpty": {"type": "boolean", "default": True},
+                "limit": {"type": "integer", "default": 40},
             },
         },
     },
@@ -93,47 +131,26 @@ TOOLS: list[dict[str, Any]] = [
         "inputSchema": {
             "type": "object",
             "properties": {
-                "project": {
-                    "type": "string",
-                    "description": "Optional project name, project ID, or workspace directory path.",
-                },
+                "project": {"type": "string"},
                 "sourceFilter": {
                     "type": "string",
                     "enum": ["ui", "exec", "ui_and_exec", "subagent", "all"],
                     "default": "ui_and_exec",
                 },
-                "search": {
-                    "type": "string",
-                    "description": "Optional keyword matching title, message preview, UUID, or path.",
-                },
-                "limit": {
-                    "type": "integer",
-                    "default": 20,
-                },
+                "search": {"type": "string"},
+                "limit": {"type": "integer", "default": 20},
             },
         },
     },
     {
         "name": "codex_bridge_read_thread",
-        "description": (
-            "Read verbatim user prompts, reasoning summaries, executed shell commands/tool calls, outputs, and subagents "
-            "from any Codex session (`state_*.sqlite` + `rollout-*.jsonl`)."
-        ),
+        "description": "Read verbatim user prompts, reasoning summaries, executed shell commands/tool calls, outputs, and subagents from any Codex session.",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "threadId": {
-                    "type": "string",
-                    "description": "Full UUID or unique UUID prefix of the Codex thread.",
-                },
-                "maxMessages": {
-                    "type": "integer",
-                    "default": 20,
-                },
-                "maxCommands": {
-                    "type": "integer",
-                    "default": 25,
-                },
+                "threadId": {"type": "string"},
+                "maxMessages": {"type": "integer", "default": 20},
+                "maxCommands": {"type": "integer", "default": 25},
             },
             "required": ["threadId"],
         },
@@ -144,14 +161,8 @@ TOOLS: list[dict[str, Any]] = [
         "inputSchema": {
             "type": "object",
             "properties": {
-                "threadId": {
-                    "type": "string",
-                    "description": "Thread UUID or unique prefix.",
-                },
-                "outputPath": {
-                    "type": "string",
-                    "description": "Optional custom destination `.md` path.",
-                },
+                "threadId": {"type": "string"},
+                "outputPath": {"type": "string"},
             },
             "required": ["threadId"],
         },
@@ -165,26 +176,15 @@ TOOLS: list[dict[str, Any]] = [
         "inputSchema": {
             "type": "object",
             "properties": {
-                "project": {
-                    "type": "string",
-                    "description": "Target Codex Project name, Project ID, or directory path.",
-                },
-                "cwd": {
-                    "type": "string",
-                    "description": "Optional explicit working directory override.",
-                },
-                "title": {
-                    "type": "string",
-                    "description": "Human-readable title shown in Codex Desktop UI sidebar.",
-                },
+                "project": {"type": "string"},
+                "cwd": {"type": "string"},
+                "title": {"type": "string"},
                 "sandbox": {
                     "type": "string",
                     "enum": ["read-only", "workspace-write", "danger-full-access"],
                     "default": "read-only",
                 },
-                "model": {
-                    "type": "string",
-                },
+                "model": {"type": "string"},
             },
         },
     },
@@ -192,55 +192,33 @@ TOOLS: list[dict[str, Any]] = [
         "name": "codex_bridge_fork_thread",
         "description": (
             "Fork/branch an existing Codex session (`thread/fork`) into a new independent UI-visible thread "
-            "preserving its prior context while keeping the original session untouched."
+            "preserving prior context while keeping the original session untouched."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
-                "threadId": {
-                    "type": "string",
-                    "description": "Source thread UUID (or prefix) to fork from.",
-                },
-                "title": {
-                    "type": "string",
-                    "description": "Title for the newly forked branch session in Codex Desktop UI.",
-                },
-                "project": {
-                    "type": "string",
-                    "description": "Optional target project override.",
-                },
+                "threadId": {"type": "string"},
+                "title": {"type": "string"},
+                "project": {"type": "string"},
                 "sandbox": {
                     "type": "string",
                     "enum": ["read-only", "workspace-write", "danger-full-access"],
                     "default": "read-only",
                 },
-                "model": {
-                    "type": "string",
-                },
+                "model": {"type": "string"},
             },
             "required": ["threadId"],
         },
     },
     {
         "name": "codex_bridge_promote_exec_threads",
-        "description": (
-            "Promote hidden CLI `source='exec'` threads into UI-visible `source='vscode'` threads and assign them "
-            "to their matching (or specified) Codex Desktop Project."
-        ),
+        "description": "Promote hidden CLI `source='exec'` threads into UI-visible `source='vscode'` threads.",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "threadIds": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                },
-                "project": {
-                    "type": "string",
-                },
-                "force": {
-                    "type": "boolean",
-                    "default": False,
-                },
+                "threadIds": {"type": "array", "items": {"type": "string"}},
+                "project": {"type": "string"},
+                "force": {"type": "boolean", "default": False},
             },
         },
     },
@@ -250,10 +228,7 @@ TOOLS: list[dict[str, Any]] = [
         "inputSchema": {
             "type": "object",
             "properties": {
-                "project": {
-                    "type": "string",
-                    "description": "Project name, Project ID, or folder path to open in Codex Desktop.",
-                }
+                "project": {"type": "string"},
             },
         },
     },
@@ -263,6 +238,15 @@ TOOLS: list[dict[str, Any]] = [
 def _handle_tool_call(name: str, args: dict[str, Any]) -> Any:
     if name == "codex_bridge_overview":
         return engine.get_overview_stats(include_live_quota=bool(args.get("includeLiveQuota", False)))
+    if name == "codex_bridge_relay_inbox":
+        return engine.check_relay_inbox(
+            include_relayed=bool(args.get("includeRelayed", False)),
+            detect_external_ui_turns=bool(args.get("detectExternalUiTurns", True)),
+            ack_ids=args.get("ackIds"),
+            ack_all=bool(args.get("ackAll", False)),
+        )
+    if name == "codex_bridge_digest_thread":
+        return engine.digest_thread_for_relay(args["threadId"])
     if name == "codex_bridge_quota_and_models":
         return engine.get_quota_and_models(include_models=bool(args.get("includeModels", True)))
     if name == "codex_bridge_doctor":
@@ -370,7 +354,7 @@ def main() -> None:
                 res = {
                     "protocolVersion": proto,
                     "capabilities": {"tools": {}},
-                    "serverInfo": {"name": "codex-bridge", "version": "1.1.0"},
+                    "serverInfo": {"name": "codex-bridge", "version": "1.2.0"},
                 }
                 _write_message({"jsonrpc": "2.0", "id": req_id, "result": res}, use_content_length)
             elif method == "ping":

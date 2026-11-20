@@ -110,7 +110,7 @@ def main() -> int:
         if proc.returncode != 0:
             print("Warning: doctor exited with non-zero status.", file=sys.stderr)
 
-    print("\n✅ Codex Bridge v1.1.0 installed successfully!")
+    print("\n✅ Codex Bridge v1.2.0 installed successfully!")
     print(f"   Plugin Path : {dest}")
     print(f"   CLI Launcher: {launchers['windows'] if os.name == 'nt' else launchers['posix']}")
     print("   Manage in Antigravity: customization://codex-bridge")

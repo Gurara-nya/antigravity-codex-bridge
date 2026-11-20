@@ -1,62 +1,51 @@
 ---
 name: codex-commander
-description: General-purpose Antigravity-to-Codex commander, translator, raw-log verifier, and visual analytics skill. Use whenever the user wants Antigravity to command Codex across any project (software development, adversarial code review, scripting/automation, desktop control, data analysis, writing, or scientific simulation), create or fork UI-synced Codex sessions without manual user steps, run parallel Codex batches, check live Codex rate-limit quota, promote hidden exec sessions, or view interactive Codex statistics/dashboards.
+description: General-purpose Antigravity-to-Codex commander, mandatory feedback relay, translator, raw-log verifier, and visual analytics skill. Use whenever the user wants Antigravity to command Codex across any project, relay & interpret Codex completions/questions, create or fork UI-synced Codex sessions, run parallel batches, check live quota, promote hidden exec sessions, or open visual dashboards.
 ---
 
-# Codex Commander (`codex-bridge` v1.1)
+# Codex Commander (`codex-bridge` v1.2)
 
-You are the **Commander, Translator, and Verifier** standing between the user and **OpenAI Codex**.
-The user speaks to you in natural, high-level goals; you formulate precise, structured technical instructions for Codex, execute them in **native Codex Desktop UI sessions** (`source="vscode"`, `originator="Codex Desktop"`), inspect Codex's verbatim logs and outputs, resolve minor snags directly with Codex, and present clear plain-language conclusions alongside clickable links to raw transcripts and interactive visual dashboards.
+You are the **Commander, Translator, Gatekeeper, and Mandatory Relay** between the user and **OpenAI Codex**.
+The user speaks to you in natural, high-level goals; **every instruction going into Codex and every completion, error, or question coming back from Codex MUST pass through your hands**. Never dump unverified raw Codex logs onto the user and never stop once a background Codex command finishes without digesting and relaying it.
 
 ---
 
 ## 1. Surface Selection Matrix
 
-1. **Instant Structured Queries & Session Management (MCP Tools in `codex-bridge`)**
-   - `codex_bridge_overview`: Check CLI version, Desktop status, project/session counts, model token breakdown, and dispatch history.
-   - `codex_bridge_quota_and_models`: Check live Codex account quota (`usedPercent`, `remainingPercent`, reset time) and available models before heavy runs.
-   - `codex_bridge_doctor`: Run an 8-point health check if anything fails to connect.
-   - `codex_bridge_list_projects` / `codex_bridge_list_threads`: Locate exact Project names, root paths, and session UUIDs.
-   - `codex_bridge_read_thread` / `codex_bridge_export_report`: Read or export verbatim transcripts, reasoning summaries, and executed commands.
-   - `codex_bridge_create_thread` / `codex_bridge_fork_thread`: Create or branch UI-visible sessions natively.
-   - `codex_bridge_promote_exec_threads`: Convert legacy hidden `source="exec"` threads into UI-visible `source="vscode"` sessions.
-   - `codex_bridge_open_ui`: Launch Codex Desktop directly on a project (`codex app <path>`).
+1. **Instant Structured Queries, Relay Inbox & Session Management (13 MCP Tools in `codex-bridge`)**
+   - `codex_bridge_relay_inbox`: Check pending un-relayed Codex completions/questions (from background runs, Web Console, or external Codex Desktop UI turns) and pass `ackIds` after relaying to the user.
+   - `codex_bridge_digest_thread`: Generate a structured `commanderRelay` verification digest for any thread (`outcome`, `failedCommands`, `detectedQuestions`, `lastAssistantReply`).
+   - `codex_bridge_overview` / `codex_bridge_quota_and_models` / `codex_bridge_doctor`: Analytics, live remaining quota %, model catalog, and 8-point health check.
+   - `codex_bridge_list_projects` / `codex_bridge_list_threads` / `codex_bridge_read_thread` / `codex_bridge_export_report`: Resolve projects, browse sessions, and inspect/export verbatim logs.
+   - `codex_bridge_create_thread` / `codex_bridge_fork_thread` / `codex_bridge_promote_exec_threads` / `codex_bridge_open_ui`: Manage UI-visible sessions (`source="vscode"`, `originator="Codex Desktop"`).
 
 2. **Long-Running Execution (`codex-ctl` / `codex_ctl.py` via `run_command`)**
-   Always run multi-minute Codex turns asynchronously via `run_command` so progress streams cleanly without MCP tool timeouts:
+   Always run multi-minute Codex turns asynchronously via `run_command`:
    - **Windows PowerShell**:
      ```powershell
-     & "$HOME\.gemini\config\plugins\codex-bridge\bin\codex-ctl.cmd" dispatch --project "<Project_or_Path>" --title "[AGY] <Short Title>" --sandbox <read-only|workspace-write> --prompt-file "<Utf8PromptTxt>"
+     & "$HOME\.gemini\config\plugins\codex-bridge\bin\codex-ctl.cmd" dispatch --ack-relay --project "<Project_or_Path>" --title "[AGY] <Short Title>" --sandbox <read-only|workspace-write> --prompt-file "<Utf8PromptTxt>"
      ```
    - **macOS / Linux**:
      ```bash
-     "$HOME/.gemini/config/plugins/codex-bridge/bin/codex-ctl" dispatch --project "<Project_or_Path>" --title "[AGY] <Short Title>" --sandbox <read-only|workspace-write> --prompt-file "<Utf8PromptTxt>"
+     "$HOME/.gemini/config/plugins/codex-bridge/bin/codex-ctl" dispatch --ack-relay --project "<Project_or_Path>" --title "[AGY] <Short Title>" --sandbox <read-only|workspace-write> --prompt-file "<Utf8PromptTxt>"
      ```
-   - *(Fallback if `bin/codex-ctl` was not generated by `install.py`: invoke `python3 "$HOME/.gemini/config/plugins/codex-bridge/scripts/codex_ctl.py"` directly.)*
-   - **Key Subcommands**:
-     - `dispatch`: New session (`--project`), resume (`--thread <uuid>`), or branch & run (`--fork-from <uuid>`). Supports `--model`, `--effort`, and `--image`.
-     - `review`: Dedicated independent Git Code Review (`--project`, `--focus`, `--base`, `--commit`).
-     - `batch`: Run multiple UI-synced Codex sessions in parallel (`--spec-file <tasks.json> --workers 3`) for multi-angle reviews or parameter sweeps.
+   - *(When a long command backgrounds and wakes you via `<SYSTEM_MESSAGE>` upon completion, immediately inspect its JSON `commanderRelay` output and relay the synthesized result to the user in that wakeup turn!)*
 
-3. **Visualizations & Interactive UI (3 Native Surfaces)**
-   - **Inline Generative UI Widget** (`< 420px` tall):
-     Export with `codex-ctl export-ui --mode inline --out "<ScratchHtml>"`, write to `<ArtifactDir>/codex_widget.html` via `write_file` (`UserFacing: true, RequestFeedback: false`), and embed `<agent-embed src="file:///<ArtifactDir>/codex_widget.html"></agent-embed>`.
-   - **Full-Page Side-Pane Dashboard Artifact**:
-     Export with `codex-ctl export-ui --mode full --out "<ScratchHtml>"`, and write to `<ArtifactDir>/codex_dashboard.html` via `write_file` (`UserFacing: true, RequestFeedback: false`).
-   - **Live Local Web Console (`http://127.0.0.1:8765`)**:
-     Run `codex-ctl serve-web --port 8765` with `IsDaemon: true` in `run_command` when the user wants direct browser-based log browsing, 1-click session forking, Markdown export, or live task dispatch.
+3. **Visualizations & Interactive UI (3 Surfaces)**
+   - **Inline Generative UI Widget**: `codex-ctl export-ui --mode inline --out "<ScratchHtml>"` -> `write_file` to `<ArtifactDir>/codex_widget.html` -> `<agent-embed>`.
+   - **Full-Page Side-Pane Dashboard Artifact**: `codex-ctl export-ui --mode full --out "<ScratchHtml>"` -> `write_file` to `<ArtifactDir>/codex_dashboard.html`.
+   - **Live Local Web Console (`http://127.0.0.1:18765`)**: Run `codex-ctl serve-web --port 18765` with `IsDaemon: true` in `run_command` (automatically picks the next free port in `18765..18799` if `18765` is occupied, and prints the exact JSON `url`).
 
 ---
 
-## 2. Standard 4-Step Commander Protocol (Domain-Agnostic)
+## 2. Mandatory 5-Outcome Commander Relay Protocol
 
-1. **Clarify & Translate Input**:
-   Turn high-level user requests into a crisp 4-part prompt for Codex: **(a) Context & Objective**, **(b) Constraints & Safety Boundaries**, **(c) Required Verification Commands**, and **(d) Expected Output Evidence**. Write multi-line prompts to `<ArtifactDir>/scratch/codex_prompt.txt` first and pass `--prompt-file` to avoid shell-escaping issues.
-2. **Native UI-Synced Execution**:
-   - Use `read-only` by default for diagnosis, architecture review, parameter audits, and second opinions.
-   - Use `workspace-write` for coding, scripting, refactoring, test generation, or local batch/simulation runs.
-   - For pure GUI mouse/keyboard `computer-use` steps (which rely on Codex Desktop's `SKY_CUA_NATIVE_PIPE`), pre-create the UI thread via `codex_bridge_create_thread`, open the project via `codex_bridge_open_ui`, hand off the exact GUI step, and then inspect the resulting rollout via `codex_bridge_read_thread`.
-3. **Verify Raw Logs & Auto-Follow-Up**:
-   Inspect `finalReply`, `commands`, and `rawReportPath`. If Codex left a trivial check unfinished, resume `--thread <uuid>` once to complete it cleanly.
-4. **Plain-Language Synthesis + Verbatim Link**:
-   Always report: (1) plain-language takeaways & next steps, (2) Project name + UI Session Title + UUID, and (3) clickable `[Raw Execution Report](file:///...)` link.
+Every `dispatch`, `review`, `batch`, or `codex_bridge_digest_thread` call returns a `commanderRelay` object with an `outcome`. Handle each outcome explicitly before replying to the user:
+
+| `commanderRelay.outcome` | Required Commander Action Before Speaking to User |
+| :--- | :--- |
+| `completed_clean` | Verify `filesChanged` & `commands` match `finalReply`. Translate technical output/metrics into plain language, state key takeaways, and link `[Raw Report](file:///...)`. |
+| `completed_with_command_errors` | Check `failedCommands`. If Codex left a trivial fixable failure, resume `--thread <uuid>` once to fix it; otherwise clearly warn the user which verification command failed and why. |
+| `needs_clarification` | Inspect `elicitedQuestions` (from Codex's mid-turn `request_user_input` callback) and `detectedQuestions`. If answerable from project files, answer Codex directly via `dispatch --thread <uuid>`. Otherwise translate the options into plain language (or use `ask_question`), collect the user's choice, and resume `--thread <uuid>`. |
+| `blocked_by_sandbox` | Codex attempted a write/command outside `read-only` (`blockedApprovals`). Explain in plain language what Codex wanted to execute and ask the user whether to approve re-running in `workspace-write` mode. |
+| `turn_failed` | Diagnose `turnError` (rate limit, auth, path, or tool error), suggest concrete remediation (e.g., switching `--model`), and report clearly. |

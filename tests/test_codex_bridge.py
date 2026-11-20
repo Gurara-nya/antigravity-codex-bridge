@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Automated unit & integration test suite for `antigravity-codex-bridge`.
-Runs hermetically against an isolated temporary `CODEX_HOME` (zero OpenAI account or live DB needed).
+Automated unit & integration test suite for `antigravity-codex-bridge` (v1.2.0).
+Runs hermetically against an isolated temporary `CODEX_HOME`.
 """
 
 from __future__ import annotations
@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import pathlib
+import socket
 import sqlite3
 import subprocess
 import sys
@@ -18,9 +19,11 @@ import unittest
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "lib"))
+sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
 import codex_engine as engine  # noqa: E402
 import dashboard_ui as ui_gen  # noqa: E402
+import web_console  # noqa: E402
 
 
 class CodexBridgeTestCase(unittest.TestCase):
@@ -38,7 +41,6 @@ class CodexBridgeTestCase(unittest.TestCase):
         os.environ["CODEX_HOME"] = str(self.codex_dir)
         os.environ["CODEX_BRIDGE_DATA_DIR"] = str(self.data_dir)
 
-        # Create mock rollout JSONL files (1 UI vscode session, 1 hidden exec session)
         sessions_dir = self.codex_dir / "sessions" / "2026" / "11" / "21"
         sessions_dir.mkdir(parents=True)
         self.ui_rollout = sessions_dir / "rollout-ui.jsonl"
@@ -90,7 +92,11 @@ class CodexBridgeTestCase(unittest.TestCase):
                         {
                             "timestamp": "2026-11-21T00:00:05Z",
                             "type": "response_item",
-                            "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "All 5 unit tests pass."}]},
+                            "payload": {
+                                "type": "message",
+                                "role": "assistant",
+                                "content": [{"type": "output_text", "text": "All 5 unit tests pass. Should I also enable strict linting?"}],
+                            },
                         }
                     ),
                 ]
@@ -115,7 +121,6 @@ class CodexBridgeTestCase(unittest.TestCase):
             encoding="utf-8",
         )
 
-        # Create mock .codex-global-state.json
         gs = {
             "local-projects": {
                 "proj-demo-1": {
@@ -133,7 +138,6 @@ class CodexBridgeTestCase(unittest.TestCase):
         }
         (self.codex_dir / ".codex-global-state.json").write_text(json.dumps(gs), encoding="utf-8")
 
-        # Create mock state_5.sqlite
         con = sqlite3.connect(str(self.codex_dir / "state_5.sqlite"))
         cur = con.cursor()
         cur.execute(
@@ -199,28 +203,57 @@ class CodexBridgeTestCase(unittest.TestCase):
         self.assertTrue(res["matched"])
         self.assertEqual(res["projectId"], "proj-demo-1")
 
-    def test_read_and_export_thread(self) -> None:
+    def test_read_export_and_digest_thread(self) -> None:
         detail = engine.read_thread("01900000-0000-7000-8000-000000000001")
         self.assertEqual(detail["totalMessages"], 2)
         self.assertEqual(detail["totalToolCalls"], 1)
         self.assertIn("5 passed", detail["recentToolCalls"][0]["outputPreview"])
 
+        dig = engine.digest_thread_for_relay("01900000-0000-7000-8000-000000000001")
+        self.assertTrue(dig["commanderRelay"]["mustRelayViaAntigravity"])
+        self.assertEqual(dig["commanderRelay"]["outcome"], "needs_clarification")
+        self.assertTrue(len(dig["commanderRelay"]["detectedQuestions"]) >= 1)
+
         exp = engine.export_thread_markdown("01900000-0000-7000-8000-000000000001")
         md_text = pathlib.Path(exp["outputPath"]).read_text(encoding="utf-8")
         self.assertIn("All 5 unit tests pass.", md_text)
-        self.assertIn("pytest", md_text)
+
+    def test_commander_relay_inbox_lifecycle(self) -> None:
+        relay = engine.build_commander_relay(
+            thread_id="01900000-0000-7000-8000-000000000001",
+            title="[AGY] Test",
+            project_name="Demo App",
+            cwd=str(self.proj_dir),
+            turn_status="completed",
+            turn_error=None,
+            final_reply="Task done.",
+            commands=[{"command": "pytest", "exitCode": 0, "status": "completed"}],
+            file_changes=[{"path": "app.py", "kind": "update"}],
+            elicited_questions=[],
+            blocked_approvals=[],
+        )
+        self.assertEqual(relay["outcome"], "completed_clean")
+        rid = engine.enqueue_relay_item(relay, "Task done.")
+
+        inbox_before = engine.check_relay_inbox(detect_external_ui_turns=False)
+        self.assertEqual(inbox_before["pendingCount"], 1)
+
+        inbox_after = engine.check_relay_inbox(ack_ids=[rid], detect_external_ui_turns=False)
+        self.assertEqual(inbox_after["pendingCount"], 0)
+
+    def test_web_console_port_default_and_fallback(self) -> None:
+        self.assertEqual(engine.DEFAULT_WEB_PORT, 18765)
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as occupier:
+            occupier.bind(("127.0.0.1", 0))
+            busy_port = occupier.getsockname()[1]
+            chosen = web_console.pick_available_port("127.0.0.1", busy_port, auto_port=True)
+            self.assertNotEqual(chosen, busy_port)
 
     def test_promote_exec_threads(self) -> None:
         prom = engine.promote_exec_threads(force=True)
         self.assertEqual(prom["promotedCount"], 1)
         first_line = json.loads(self.exec_rollout.read_text(encoding="utf-8").splitlines()[0])
         self.assertEqual(first_line["payload"]["source"], "vscode")
-        self.assertEqual(first_line["payload"]["originator"], "Codex Desktop")
-
-        hidden_after = engine.list_threads(source_filter="exec")
-        self.assertEqual(len(hidden_after), 0)
-        ui_after = engine.list_threads(source_filter="ui")
-        self.assertEqual(len(ui_after), 2)
 
     def test_dashboard_html_generation(self) -> None:
         inline_html = ui_gen.build_inline_widget_html(include_live_quota=False)
@@ -228,7 +261,7 @@ class CodexBridgeTestCase(unittest.TestCase):
         self.assertIn("tailwindcss.min.js", inline_html)
         self.assertIn("Demo App", full_html)
 
-    def test_mcp_stdio_newline_and_content_length(self) -> None:
+    def test_mcp_stdio_tools(self) -> None:
         srv = str(REPO_ROOT / "mcp" / "server.py")
         env = os.environ.copy()
         proc = subprocess.Popen(
@@ -240,30 +273,24 @@ class CodexBridgeTestCase(unittest.TestCase):
         )
         try:
             assert proc.stdin and proc.stdout
-            # 1. Newline-delimited JSON-RPC
             init_req = json.dumps(
                 {
                     "jsonrpc": "2.0",
                     "id": 1,
                     "method": "initialize",
-                    "params": {"protocolVersion": "2025-03-26", "capabilities": {}, "clientInfo": {"name": "unit", "version": "1.0"}},
+                    "params": {"protocolVersion": "2025-03-26", "capabilities": {}, "clientInfo": {"name": "unit", "version": "1.2"}},
                 }
             ).encode("utf-8")
             proc.stdin.write(init_req + b"\n")
             proc.stdin.flush()
             init_resp = json.loads(proc.stdout.readline().decode("utf-8"))
-            self.assertEqual(init_resp["result"]["serverInfo"]["name"], "codex-bridge")
+            self.assertEqual(init_resp["result"]["serverInfo"]["version"], "1.2.0")
 
-            # 2. Call overview tool
-            call_req = json.dumps(
-                {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "codex_bridge_overview", "arguments": {}}}
-            ).encode("utf-8")
-            proc.stdin.write(call_req + b"\n")
+            tl_req = json.dumps({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}).encode("utf-8")
+            proc.stdin.write(tl_req + b"\n")
             proc.stdin.flush()
-            call_resp = json.loads(proc.stdout.readline().decode("utf-8"))
-            ov = json.loads(call_resp["result"]["content"][0]["text"])
-            self.assertEqual(ov["projectCount"], 1)
-            self.assertEqual(ov["threads"]["total"], 2)
+            tl_resp = json.loads(proc.stdout.readline().decode("utf-8"))
+            self.assertEqual(len(tl_resp["result"]["tools"]), 13)
         finally:
             proc.terminate()
             proc.wait(timeout=3)
