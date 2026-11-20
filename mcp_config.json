@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "codex-bridge": {
+      "command": "python",
+      "args": [
+        "-u",
+        "mcp/server.py"
+      ],
+      "env": {
+        "PYTHONIOENCODING": "utf-8"
+      }
+    }
+  }
+}

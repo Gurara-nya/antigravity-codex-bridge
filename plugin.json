@@ -1,0 +1,21 @@
+{
+  "name": "codex-bridge",
+  "displayName": "Codex Bridge",
+  "version": "1.1.0",
+  "description": "Native Antigravity-to-Codex orchestration bridge: dispatch & supervise Codex tasks across any project, sync & fork sessions natively into Codex Desktop UI, monitor live rate limits & token analytics, and inspect verbatim execution logs.",
+  "author": {
+    "name": "Gurara-nya",
+    "url": "https://github.com/Gurara-nya"
+  },
+  "homepage": "https://github.com/Gurara-nya/antigravity-codex-bridge",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Gurara-nya/antigravity-codex-bridge.git"
+  },
+  "logo": "assets/logo.svg",
+  "suggestedPrompts": [
+    "打开 Codex Bridge 可视化统计面板，查看实时配额、各模型 Token 消耗与项目总览",
+    "列出我 Codex 里的项目，并在指定项目下自动创建一个 UI 同步会话派发分析或审查任务",
+    "读取最近一次 Codex 会话的原始执行日志，并用通俗中文解读它的操作步骤与结果"
+  ]
+}

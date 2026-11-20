@@ -1,0 +1,12 @@
+# Runtime plugin state & user logs (never commit personal session data)
+data/
+bin/
+dist/
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.DS_Store
+Thumbs.db
+*.bak
+*.log
