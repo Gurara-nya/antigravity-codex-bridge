@@ -4,52 +4,90 @@
   <p><strong>Native Dual-Agent Orchestration, Mandatory Commander Feedback Relay, Zero-Click UI Sync & Visual Analytics Plugin for Google Antigravity ↔ OpenAI Codex</strong></p>
   <p>
     <a href="./README.md">中文文档</a> ·
-    <a href="#-why-codex-bridge-v12">Why Codex Bridge</a> ·
-    <a href="#-three-visual-surfaces">Visual Dashboards</a> ·
-    <a href="#-quick-install--upgrade">Quick Install</a>
+    <a href="#-quick-start-recommended-official-release-zip">Quick Start (Release ZIP)</a> ·
+    <a href="#-why-codex-bridge">Why Codex Bridge</a> ·
+    <a href="#-testing--release-zip-verification">Verification</a>
   </p>
 </div>
 
 ---
 
-## ✨ Overview
+## ⚡ Quick Start (Recommended: Official Release ZIP)
 
-**Antigravity Codex Bridge (`codex-bridge` v1.2)** is a zero-dependency (Python 3.11+ stdlib only) native plugin for **Google Antigravity**. It turns Antigravity into your **Lead Architect, Prompt Translator, and Mandatory Feedback Relay** while orchestrating **OpenAI Codex (Desktop & CLI)** across **Windows, macOS, and Linux**.
+### 1. Prerequisites
+- **Python 3.11+** (stdlib only — **zero `pip install` dependencies**; on Windows, `install.ps1` automatically probes all installed Python binaries and skips versions older than 3.11).
+- **Google Antigravity** (IDE, Desktop 2.0, or CLI).
+- **OpenAI Codex** (authenticated **Codex Desktop** or **Codex CLI**).
 
----
+### 2. Download & Extract the Official Release ZIP
+Download `antigravity-codex-bridge-v1.2.1.zip` from [**GitHub Releases (Latest)**](https://github.com/Gurara-nya/antigravity-codex-bridge/releases/latest) (or [v1.2.1 Expanded Assets](https://github.com/Gurara-nya/antigravity-codex-bridge/releases/expanded_assets/v1.2.1)) and extract it. Extracting creates a `codex-bridge/` folder.
 
-## 🚀 Why Codex Bridge v1.2?
-
-- **Mandatory Commander Relay Loop (`commanderRelay` + Relay Inbox)**: Every Codex completion, mid-turn `request_user_input` question, non-zero command exit, or sandbox escalation is captured into a structured `commanderRelay` verification digest (`completed_clean`, `completed_with_command_errors`, `needs_clarification`, `blocked_by_sandbox`, `turn_failed`) and tracked in the Relay Inbox (`codex_bridge_relay_inbox`)—ensuring Antigravity always verifies, answers trivial technical follow-ups, and translates outcomes into plain language for you.
-- **Zero-Click Native Codex Desktop UI Sync**: Creates native `source="vscode"` (`originator="Codex Desktop"`) threads via `codex app-server --stdio`, names them clearly, and assigns them directly to your Codex Projects—plus 1-click promotion for legacy `exec` threads.
-- **13 Fast Native MCP Tools + Async `codex-ctl` Engine**: Sub-second analytics, live account rate-limit quota & model catalog checks, Relay Inbox & thread verification digests, session branching (`thread/fork`), adversarial Git Code Review (`review`), and parallel batch execution (`batch`).
-- **Conflict-Free Visual Dashboards**: Inline Generative UI Widget, 4-tab Full-Screen Side-Pane Artifact, and a standalone **Live Local Web Console** on port **`18765`** (`http://127.0.0.1:18765`, with automatic `18765..18799` free-port fallback).
-
----
-
-## ⚡ Quick Install & Upgrade
+### 3. Run the Installer Script
+Open a terminal inside the extracted `codex-bridge/` folder:
 
 **Windows (PowerShell):**
 ```powershell
-git clone https://github.com/Gurara-nya/antigravity-codex-bridge.git
-cd antigravity-codex-bridge
-.\install.ps1
+cd .\codex-bridge
+powershell -ExecutionPolicy Bypass -File .\install.ps1
 ```
 
 **macOS / Linux:**
 ```bash
+cd ./codex-bridge
+chmod +x install.sh && ./install.sh
+```
+
+The installer strictly separates **file installation** from **Bridge readiness** and prints **one of three explicit final outcomes**:
+1. **`安装完成，自检通过 (Installed, self-check passed)`**: Python 3.11+, Codex binary, credentials, and live `codex app-server --stdio` JSON-RPC handshake all succeeded (optional Desktop project library advisories are noted separately if applicable).
+2. **`文件已安装，自检未通过 (Files installed, self-check failed)`**: Plugin files are installed, but Codex is missing, unauthenticated, or failed the `app-server` handshake. Actionable next steps are printed immediately. Pass `--strict-doctor` in CI/automation to exit with code `1` when self-check fails.
+3. **`文件已安装，跳过自检 (Files installed, self-check skipped)`**: Printed when `--skip-doctor` is used.
+
+### 4. Re-running `doctor` Standalone Anytime
+After signing in to Codex or updating your binary, re-verify readiness directly without reinstalling (`0` = Bridge ready, `1` = unavailable):
+
+- **Windows (PowerShell):**
+  ```powershell
+  & "$HOME\.gemini\config\plugins\codex-bridge\bin\codex-ctl.cmd" doctor
+  ```
+- **macOS / Linux:**
+  ```bash
+  "$HOME/.gemini/config/plugins/codex-bridge/bin/codex-ctl" doctor
+  ```
+
+### 5. Confirming the Plugin Works Inside Antigravity (First Run)
+1. Open `customization://codex-bridge` inside Antigravity and confirm **Codex Bridge** is **Enabled** with its `codex-bridge` MCP server and `codex-commander` skill listed.
+2. In your next chat turn, send:
+   > `Run codex_bridge_doctor and codex_bridge_overview to verify Codex Bridge connectivity, discovered projects, and remaining quota.`
+   Seeing `"healthy": true` confirms end-to-end connectivity!
+
+---
+
+## 🛠️ Developer Install (From Source via Git)
+
+```bash
 git clone https://github.com/Gurara-nya/antigravity-codex-bridge.git
 cd antigravity-codex-bridge
-chmod +x install.sh && ./install.sh
+# Windows PowerShell: .\install.ps1
+# macOS / Linux:      ./install.sh
 ```
 
 ---
 
-## 🧪 Testing & Release Packaging
+## 🚀 Why Codex Bridge?
+
+- **Mandatory Commander Relay Loop (`commanderRelay` + Relay Inbox)**: Captures every Codex completion, mid-turn `request_user_input` question, non-zero command exit, and `read-only` sandbox escalation into a structured digest so Antigravity always verifies and translates outcomes for you.
+- **Strict Layered Readiness Diagnostics (`doctor`)**: Distinguishes core blockers (including live `app-server` JSON-RPC handshake) from optional Desktop DB advisories, returning accurate exit codes (`0` vs `1`).
+- **Zero-Click Native Codex Desktop UI Sync**: Creates `source="vscode"` (`originator="Codex Desktop"`) sessions directly via `codex app-server --stdio` and assigns them to your Projects—plus 1-click promotion for legacy `exec` threads.
+- **13 Native MCP Tools + Async `codex-ctl` Engine + 3 Visual Surfaces**: Inline Generative UI Widget, 4-tab Side-Pane Control Center, and standalone Live Web Console on port **`18765`** (`18765..18799` auto-fallback).
+
+---
+
+## 🧪 Testing & Release ZIP Verification
 
 ```bash
 python tests/test_codex_bridge.py
 python scripts/build_release.py
+python tests/test_release_zip.py
 ```
 
 ## 📄 License

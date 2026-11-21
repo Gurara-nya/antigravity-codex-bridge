@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Zero-dependency Model Context Protocol (MCP) Stdio Server for `antigravity-codex-bridge` (v1.2.0).
+Zero-dependency Model Context Protocol (MCP) Stdio Server for `antigravity-codex-bridge` (v1.2.1).
 Exposes 13 native tools including Commander Relay Inbox & Structured Thread Verification Digest.
 """
 
@@ -354,7 +354,7 @@ def main() -> None:
                 res = {
                     "protocolVersion": proto,
                     "capabilities": {"tools": {}},
-                    "serverInfo": {"name": "codex-bridge", "version": "1.2.0"},
+                    "serverInfo": {"name": "codex-bridge", "version": "1.2.1"},
                 }
                 _write_message({"jsonrpc": "2.0", "id": req_id, "result": res}, use_content_length)
             elif method == "ping":

@@ -116,8 +116,11 @@ def path_is_within(child_key: str, parent_key: str) -> bool:
 def find_codex_exe() -> Optional[str]:
     """Locate the newest runnable `codex` binary across Windows, macOS, and Linux."""
     env_p = os.environ.get("CODEX_CLI_PATH")
-    if env_p and pathlib.Path(env_p).is_file():
-        return str(pathlib.Path(env_p))
+    if env_p:
+        if pathlib.Path(env_p).is_file():
+            return str(pathlib.Path(env_p))
+        if os.environ.get("CODEX_BRIDGE_NO_SYSTEM_SEARCH") == "1":
+            return None
 
     cfg_file = config_toml_path()
     if cfg_file.is_file():
@@ -133,6 +136,9 @@ def find_codex_exe() -> Optional[str]:
                 return str(pathlib.Path(cfg_cli))
         except Exception:
             pass
+
+    if os.environ.get("CODEX_BRIDGE_NO_SYSTEM_SEARCH") == "1":
+        return None
 
     which_p = shutil.which("codex") or shutil.which("codex.exe")
     if which_p:
@@ -2123,47 +2129,225 @@ def open_in_desktop_ui(project_or_path: Optional[str] = None) -> dict[str, Any]:
     return {"launched": True, "cwd": cwd, "projectName": resolved.get("projectName")}
 
 
+def _probe_app_server_handshake(exe: str, timeout_sec: float = 10.0) -> tuple[bool, str]:
+    """Run an isolated `codex app-server --stdio` initialize handshake with a strict timeout."""
+    t0 = time.time()
+    proc: Optional[subprocess.Popen[str]] = None
+    try:
+        proc = subprocess.Popen(
+            [exe, "app-server", "--stdio"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=1,
+        )
+
+        def _handshake() -> dict[str, Any]:
+            assert proc and proc.stdin and proc.stdout
+            init_msg = {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "clientInfo": {"name": "Codex Desktop", "title": "Codex Desktop", "version": "1.2.1"},
+                    "capabilities": {"experimentalApi": True},
+                },
+            }
+            proc.stdin.write(json.dumps(init_msg) + "\n")
+            proc.stdin.flush()
+            while True:
+                line = proc.stdout.readline()
+                if not line:
+                    err_tail = proc.stderr.read()[-400:].strip() if proc.stderr else ""
+                    raise RuntimeError(f"app-server closed before initialize response. {err_tail}".strip())
+                line = line.strip()
+                if not line:
+                    continue
+                msg = json.loads(line)
+                if msg.get("id") == 1:
+                    if "error" in msg:
+                        raise RuntimeError(f"RPC error: {json.dumps(msg['error'], ensure_ascii=False)}")
+                    return msg.get("result") or {}
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            fut = pool.submit(_handshake)
+            fut.result(timeout=timeout_sec)
+
+        ms = round((time.time() - t0) * 1000)
+        return True, f"JSON-RPC handshake OK ({ms}ms)"
+    except concurrent.futures.TimeoutError:
+        return False, f"app-server handshake timed out after {timeout_sec}s"
+    except Exception as exc:
+        return False, str(exc)
+    finally:
+        if proc:
+            try:
+                if proc.stdin:
+                    proc.stdin.close()
+                proc.terminate()
+                proc.wait(timeout=2)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+            finally:
+                for pipe in (proc.stdin, proc.stdout, proc.stderr):
+                    if pipe:
+                        try:
+                            pipe.close()
+                        except Exception:
+                            pass
+
+
 def run_doctor() -> dict[str, Any]:
-    """Run an 8-point diagnostic check on the local Codex + Codex Bridge environment."""
+    """
+    Run an 8-point diagnostic check separating core Bridge readiness (`severity='blocker'`)
+    from optional Desktop UI metadata availability (`severity='advisory'`).
+    `healthy` / `bridgeReady` is True iff ALL blocker checks pass (including `app_server_rpc`).
+    """
     checks: list[dict[str, Any]] = []
+
     py_ver = sys.version.split()[0]
-    checks.append({"check": "python_version", "ok": sys.version_info >= (3, 11), "detail": py_ver})
+    py_ok = sys.version_info >= (3, 11)
+    checks.append(
+        {
+            "check": "python_version",
+            "severity": "blocker",
+            "ok": py_ok,
+            "detail": py_ver,
+            "nextStep": None if py_ok else "安装 Python 3.11+ (https://www.python.org/downloads/) 后重新运行安装脚本。",
+        }
+    )
 
     exe = find_codex_exe()
-    checks.append({"check": "codex_binary", "ok": bool(exe), "detail": exe or "Not found"})
+    exe_ok = bool(exe)
+    checks.append(
+        {
+            "check": "codex_binary",
+            "severity": "blocker",
+            "ok": exe_ok,
+            "detail": exe or "Not found",
+            "nextStep": None
+            if exe_ok
+            else "安装 OpenAI Codex Desktop 桌面端或 Codex CLI（或设置环境变量 CODEX_CLI_PATH 指向 codex 可执行文件），再重跑 doctor。",
+        }
+    )
 
     ver = get_codex_version(exe) if exe else "unavailable"
-    checks.append({"check": "codex_version", "ok": bool(exe and not ver.startswith("error")), "detail": ver})
+    ver_ok = bool(exe and not ver.startswith("error") and ver not in ("not-found", "unavailable"))
+    checks.append(
+        {
+            "check": "codex_version",
+            "severity": "blocker",
+            "ok": ver_ok,
+            "detail": ver,
+            "nextStep": None if ver_ok else "确认检测到的 codex 可执行文件未损坏且有执行权限（运行 `codex --version` 验证）。",
+        }
+    )
 
     home = codex_home()
-    auth_ok = (home / "auth.json").is_file()
-    checks.append({"check": "codex_auth", "ok": auth_ok, "detail": str(home / "auth.json") if auth_ok else "auth.json missing"})
+    has_auth_file = (home / "auth.json").is_file()
+    has_api_key = bool(os.environ.get("OPENAI_API_KEY"))
+    auth_ok = has_auth_file or has_api_key
+    auth_detail = str(home / "auth.json") if has_auth_file else ("OPENAI_API_KEY env set" if has_api_key else f"Missing {home / 'auth.json'}")
+    checks.append(
+        {
+            "check": "codex_auth",
+            "severity": "blocker",
+            "ok": auth_ok,
+            "detail": auth_detail,
+            "nextStep": None if auth_ok else "打开 Codex Desktop 完成登录，或在终端执行 `codex login`（或配置 OPENAI_API_KEY），然后重跑 doctor。",
+        }
+    )
+
+    rpc_ok = False
+    rpc_detail = "skipped (codex_binary missing)"
+    if exe and ver_ok:
+        rpc_ok, rpc_detail = _probe_app_server_handshake(exe)
+    elif exe:
+        rpc_detail = "skipped (codex_version failed)"
+    checks.append(
+        {
+            "check": "app_server_rpc",
+            "severity": "blocker",
+            "ok": rpc_ok,
+            "detail": rpc_detail,
+            "nextStep": None
+            if rpc_ok
+            else "确认已安装的 Codex 版本支持 `codex app-server --stdio`（建议升级至最新 Codex Desktop / CLI）并已完成登录，随后重跑 doctor。",
+        }
+    )
 
     db = state_db_path()
     db_ok = db.is_file()
-    checks.append({"check": "state_sqlite", "ok": db_ok, "detail": str(db) if db_ok else "state_*.sqlite missing"})
+    checks.append(
+        {
+            "check": "state_sqlite",
+            "severity": "advisory",
+            "ok": db_ok,
+            "detail": str(db) if db_ok else f"Not initialized yet ({db.name})",
+            "nextStep": None
+            if db_ok
+            else "本地历史库尚未生成（历史统计与旧会话转正功能暂受限）；打开一次 Codex Desktop 或执行首条派发任务后会自动初始化。",
+        }
+    )
 
-    projs = list_projects(include_empty=True) if db_ok or global_state_path().is_file() else []
-    checks.append({"check": "desktop_projects", "ok": True, "detail": f"{len(projs)} projects discovered"})
-
-    rpc_ok = False
-    rpc_detail = "skipped"
-    if exe:
-        t0 = time.time()
-        try:
-            with AppServerClient(exe):
-                rpc_ok = True
-                rpc_detail = f"JSON-RPC handshake OK ({round((time.time() - t0) * 1000)}ms)"
-        except Exception as e:
-            rpc_detail = str(e)
-    checks.append({"check": "app_server_rpc", "ok": rpc_ok, "detail": rpc_detail})
+    projs = list_projects(include_empty=True) if (db_ok or global_state_path().is_file()) else []
+    proj_ok = len(projs) > 0
+    checks.append(
+        {
+            "check": "desktop_projects",
+            "severity": "advisory",
+            "ok": proj_ok,
+            "detail": f"{len(projs)} projects discovered",
+            "nextStep": None
+            if proj_ok
+            else "未检测到 Codex Desktop 项目列表（按项目名归类功能暂受限）；派发任务时可直接传 `--cwd <目录路径>`，或在 Codex Desktop 中添加项目。",
+        }
+    )
 
     hidden_cnt = len(list_threads(source_filter="exec", limit=100)) if db_ok else 0
-    checks.append({"check": "ui_sync_health", "ok": True, "detail": f"{hidden_cnt} hidden exec threads"})
+    sync_ok = hidden_cnt == 0
+    checks.append(
+        {
+            "check": "ui_sync_health",
+            "severity": "advisory",
+            "ok": sync_ok,
+            "detail": f"{hidden_cnt} hidden exec threads",
+            "nextStep": None
+            if sync_ok
+            else f"存在 {hidden_cnt} 条旧版隐藏 exec 会话；如需在桌面端侧边栏查看，可关闭 Codex Desktop 后运行 `codex-ctl promote`。",
+        }
+    )
+
+    failed_blockers = [
+        {"check": c["check"], "detail": c["detail"], "nextStep": c["nextStep"]}
+        for c in checks
+        if c["severity"] == "blocker" and not c["ok"]
+    ]
+    warnings = [
+        {"check": c["check"], "detail": c["detail"], "nextStep": c["nextStep"]}
+        for c in checks
+        if c["severity"] == "advisory" and not c["ok"]
+    ]
+    healthy = len(failed_blockers) == 0
+    status = "unavailable" if not healthy else ("ready_with_warnings" if warnings else "ready")
+    next_steps = [b["nextStep"] for b in failed_blockers if b.get("nextStep")] or [
+        w["nextStep"] for w in warnings if w.get("nextStep")
+    ]
 
     return {
-        "healthy": all(c["ok"] for c in checks[:5]),
+        "healthy": healthy,
+        "bridgeReady": healthy,
+        "status": status,
         "desktopRunning": is_desktop_running(),
         "defaultWebPort": DEFAULT_WEB_PORT,
+        "failedBlockers": failed_blockers,
+        "warnings": warnings,
+        "nextSteps": next_steps,
         "checks": checks,
     }

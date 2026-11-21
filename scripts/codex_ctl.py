@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-`codex_ctl.py` — Command-line orchestration, Commander Relay inbox, & UI export tool for `antigravity-codex-bridge` (v1.2.0).
+`codex_ctl.py` — Command-line orchestration, Commander Relay inbox, & UI export tool for `antigravity-codex-bridge` (v1.2.1).
 """
 
 from __future__ import annotations
@@ -28,7 +28,7 @@ def _print_json(data: object) -> None:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Antigravity <-> Codex Bridge CLI Controller (v1.2.0)")
+    parser = argparse.ArgumentParser(description="Antigravity <-> Codex Bridge CLI Controller (v1.2.1)")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     # doctor
@@ -149,8 +149,9 @@ def main() -> int:
     args = parser.parse_args()
 
     if args.cmd == "doctor":
-        _print_json(engine.run_doctor())
-        return 0
+        doc = engine.run_doctor()
+        _print_json(doc)
+        return 0 if doc.get("healthy") else 1
 
     if args.cmd == "quota":
         _print_json(engine.get_quota_and_models(include_models=not args.no_models))

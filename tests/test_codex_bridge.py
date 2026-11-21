@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Automated unit & integration test suite for `antigravity-codex-bridge` (v1.2.0).
+Automated unit & integration test suite for `antigravity-codex-bridge` (v1.2.1).
 Runs hermetically against an isolated temporary `CODEX_HOME`.
 """
 
@@ -16,6 +16,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "lib"))
@@ -284,7 +285,7 @@ class CodexBridgeTestCase(unittest.TestCase):
             proc.stdin.write(init_req + b"\n")
             proc.stdin.flush()
             init_resp = json.loads(proc.stdout.readline().decode("utf-8"))
-            self.assertEqual(init_resp["result"]["serverInfo"]["version"], "1.2.0")
+            self.assertEqual(init_resp["result"]["serverInfo"]["version"], "1.2.1")
 
             tl_req = json.dumps({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}).encode("utf-8")
             proc.stdin.write(tl_req + b"\n")
@@ -297,6 +298,37 @@ class CodexBridgeTestCase(unittest.TestCase):
             for pipe in (proc.stdin, proc.stdout, proc.stderr):
                 if pipe:
                     pipe.close()
+
+    def test_doctor_blocker_vs_advisory_readiness(self) -> None:
+        (self.codex_dir / "auth.json").write_text('{"token":"ok"}', encoding="utf-8")
+
+        # 1. Handshake fails -> healthy MUST be False even if binary/version/auth pass
+        with (
+            mock.patch.object(engine, "find_codex_exe", return_value="/mock/codex"),
+            mock.patch.object(engine, "get_codex_version", return_value="codex-cli 0.169.1"),
+            mock.patch.object(engine, "_probe_app_server_handshake", return_value=(False, "RPC handshake failed")),
+        ):
+            doc_fail = engine.run_doctor()
+            self.assertFalse(doc_fail["healthy"])
+            self.assertFalse(doc_fail["bridgeReady"])
+            self.assertEqual(doc_fail["status"], "unavailable")
+            self.assertEqual([b["check"] for b in doc_fail["failedBlockers"]], ["app_server_rpc"])
+
+        # 2. Handshake passes, but Desktop SQLite/projects missing -> healthy True with advisory warnings
+        (self.codex_dir / "state_5.sqlite").unlink()
+        (self.codex_dir / ".codex-global-state.json").unlink()
+        with (
+            mock.patch.object(engine, "find_codex_exe", return_value="/mock/codex"),
+            mock.patch.object(engine, "get_codex_version", return_value="codex-cli 0.169.1"),
+            mock.patch.object(engine, "_probe_app_server_handshake", return_value=(True, "JSON-RPC handshake OK (12ms)")),
+        ):
+            doc_warn = engine.run_doctor()
+            self.assertTrue(doc_warn["healthy"])
+            self.assertTrue(doc_warn["bridgeReady"])
+            self.assertEqual(doc_warn["status"], "ready_with_warnings")
+            warn_names = {w["check"] for w in doc_warn["warnings"]}
+            self.assertIn("state_sqlite", warn_names)
+            self.assertIn("desktop_projects", warn_names)
 
 
 if __name__ == "__main__":
