@@ -285,7 +285,7 @@ class CodexBridgeTestCase(unittest.TestCase):
             proc.stdin.write(init_req + b"\n")
             proc.stdin.flush()
             init_resp = json.loads(proc.stdout.readline().decode("utf-8"))
-            self.assertEqual(init_resp["result"]["serverInfo"]["version"], "1.2.1")
+            self.assertEqual(init_resp["result"]["serverInfo"]["version"], "1.2.2")
 
             tl_req = json.dumps({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}).encode("utf-8")
             proc.stdin.write(tl_req + b"\n")
@@ -329,6 +329,69 @@ class CodexBridgeTestCase(unittest.TestCase):
             warn_names = {w["check"] for w in doc_warn["warnings"]}
             self.assertIn("state_sqlite", warn_names)
             self.assertIn("desktop_projects", warn_names)
+
+    def test_thread_uri_prefix_and_auto_fork_on_writer_lock(self) -> None:
+        # 1. `codex://threads/<uuid>` and short prefix resolution
+        self.assertEqual(
+            engine.normalize_thread_ref("codex://threads/01900000-0000-7000-8000-000000000001"),
+            "01900000-0000-7000-8000-000000000001",
+        )
+        d_uri = engine.read_thread("codex://threads/01900000-0000-7000-8000-000000000001")
+        d_short = engine.read_thread("01900000-0000-7000-8000-000000000001"[:8])
+        self.assertEqual(d_uri["id"], "01900000-0000-7000-8000-000000000001")
+        self.assertEqual(d_short["id"], "01900000-0000-7000-8000-000000000001")
+
+        # 2. Seamless `thread/fork` fallback when Codex Desktop holds `already has an active writer`
+        calls: list[tuple[str, dict]] = []
+
+        class FakeLockedAppServerClient:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def request(self, method: str, params: dict):
+                calls.append((method, params))
+                if method == "thread/resume":
+                    raise RuntimeError(
+                        'RPC thread/resume error: {"code": -32600, "message": "thread 01900000-0000-7000-8000-000000000001 already has an active writer"}'
+                    )
+                if method == "thread/fork":
+                    return {"thread": {"id": "01900000-0000-7000-8000-000000000099", "source": "vscode"}, "model": "gpt-6.2-sol"}
+                if method == "thread/name/set":
+                    return {}
+                if method == "turn/start":
+                    return {"turn": {"id": "turn_99"}}
+                return {}
+
+            def stream_until_turn_complete(self, thread_id: str, on_progress=None):
+                return {
+                    "turnStatus": "completed",
+                    "turnError": None,
+                    "finalReply": "Continued seamlessly via auto-fork.",
+                    "reasoningSummary": "",
+                    "commands": [],
+                    "fileChanges": [],
+                    "elicitedQuestions": [],
+                    "blockedApprovals": [],
+                }
+
+        with mock.patch.object(engine, "AppServerClient", FakeLockedAppServerClient):
+            out = engine.dispatch_task(
+                prompt="Continue revising section 2",
+                thread_id="01900000",
+                sandbox="read-only",
+                auto_ack_relay=True,
+            )
+            self.assertEqual(out["autoForkedFrom"], "01900000-0000-7000-8000-000000000001")
+            self.assertEqual(out["threadId"], "01900000-0000-7000-8000-000000000099")
+            self.assertTrue(out["title"].startswith("[AGY 续]"))
+            methods = [m for m, _ in calls]
+            self.assertEqual(methods, ["thread/resume", "thread/fork", "thread/name/set", "turn/start"])
 
 
 if __name__ == "__main__":

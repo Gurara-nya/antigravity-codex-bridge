@@ -30,6 +30,7 @@ The user speaks to you in natural, high-level goals; **every instruction going i
      "$HOME/.gemini/config/plugins/codex-bridge/bin/codex-ctl" dispatch --ack-relay --project "<Project_or_Path>" --title "[AGY] <Short Title>" --sandbox <read-only|workspace-write> --prompt-file "<Utf8PromptTxt>"
      ```
    - *(When a long command backgrounds and wakes you via `<SYSTEM_MESSAGE>` upon completion, immediately inspect its JSON `commanderRelay` output and relay the synthesized result to the user in that wakeup turn!)*
+   - **Automatic Writer-Lock Bypass (`--on-lock auto-fork`, default)**: When continuing a thread that is open in Codex Desktop UI (`thread ... already has an active writer`), `dispatch --thread <uuid_or_prefix_or_uri>` automatically waits if a turn is actively running and then seamlessly forks 100% of context into an unlocked `[AGY 续]` thread (`autoForkedFrom` is set in output). Do **not** ask the user to close Codex Desktop or choose how to bypass writer locks; just use the returned `threadId` going forward.
 
 3. **Visualizations & Interactive UI (3 Surfaces)**
    - **Inline Generative UI Widget**: `codex-ctl export-ui --mode inline --out "<ScratchHtml>"` -> `write_file` to `<ArtifactDir>/codex_widget.html` -> `<agent-embed>`.

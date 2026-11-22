@@ -20,7 +20,7 @@
 - **OpenAI Codex** (authenticated **Codex Desktop** or **Codex CLI**).
 
 ### 2. Download & Extract the Official Release ZIP
-Download `antigravity-codex-bridge-v1.2.1.zip` from [**GitHub Releases (Latest)**](https://github.com/Gurara-nya/antigravity-codex-bridge/releases/latest) (or [v1.2.1 Expanded Assets](https://github.com/Gurara-nya/antigravity-codex-bridge/releases/expanded_assets/v1.2.1)) and extract it. Extracting creates a `codex-bridge/` folder.
+Download `antigravity-codex-bridge-v1.2.2.zip` from [**GitHub Releases (Latest)**](https://github.com/Gurara-nya/antigravity-codex-bridge/releases/latest) (or [v1.2.2 Expanded Assets](https://github.com/Gurara-nya/antigravity-codex-bridge/releases/expanded_assets/v1.2.2)) and extract it. Extracting creates a `codex-bridge/` folder.
 
 ### 3. Run the Installer Script
 Open a terminal inside the extracted `codex-bridge/` folder:

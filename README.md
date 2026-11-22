@@ -10,7 +10,7 @@
     <a href="#-功能清单">功能参考</a>
   </p>
   <p>
-    <img src="https://img.shields.io/badge/version-1.2.1-3B82F6" alt="Version 1.2.1" />
+    <img src="https://img.shields.io/badge/version-1.2.2-3B82F6" alt="Version 1.2.2" />
     <img src="https://img.shields.io/badge/python-3.11%2B%20(zero%20deps)-10B981" alt="Python 3.11+ Zero Dependencies" />
     <img src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-6366F1" alt="Cross Platform" />
     <img src="https://img.shields.io/badge/license-MIT-slate" alt="MIT License" />
@@ -27,7 +27,7 @@
 - **OpenAI Codex**（已安装并完成账号登录的 **Codex Desktop 桌面端** 或 **Codex CLI**）。
 
 ### 2. 下载并解压正式发布 ZIP
-前往 [**GitHub Releases 最新版本页面**](https://github.com/Gurara-nya/antigravity-codex-bridge/releases/latest)（或直接查看 [v1.2.1 发布资产列表](https://github.com/Gurara-nya/antigravity-codex-bridge/releases/expanded_assets/v1.2.1)），下载 `antigravity-codex-bridge-v1.2.1.zip` 并解压。解压后会得到 `codex-bridge` 文件夹。
+前往 [**GitHub Releases 最新版本页面**](https://github.com/Gurara-nya/antigravity-codex-bridge/releases/latest)（或直接查看 [v1.2.2 发布资产列表](https://github.com/Gurara-nya/antigravity-codex-bridge/releases/expanded_assets/v1.2.2)），下载 `antigravity-codex-bridge-v1.2.2.zip` 并解压。解压后会得到 `codex-bridge` 文件夹。
 
 ### 3. 运行安装脚本
 进入解压后的 `codex-bridge` 目录，运行对应系统的安装脚本：
@@ -95,7 +95,7 @@ cd antigravity-codex-bridge
 
 ## 🚀 核心优势（解决什么痛点？）
 
-| 传统双工具割裂痛点 | Codex Bridge v1.2.1 原生解决方案 |
+| 传统双工具割裂痛点 | Codex Bridge v1.2.2 原生解决方案 |
 | :--- | :--- |
 | **执行后没人兜底解读**：普通 CLI 跑完吐出一堆晦涩日志，或者 Codex 中途追问参数、权限受阻时无人接应 | **强制总工转达闭环（Commander Relay）**：拦截 `request_user_input` 中途提问与只读越权请求，自动归类 5 种状态并写入 **Relay Inbox**，强制经由 Antigravity 核验翻译后再转达给你 |
 | **安装成功却连不上**：传统脚本复制完文件就报成功，真正调用时才发现旧版 Python、缺登录态或握手失败 | **严格分层首装自检（`doctor`）**：区分核心阻断项（含 `app-server` 实时握手）与桌面端可选提示，按真实可用性返回退出码并给出下一步修复命令 |
@@ -111,7 +111,7 @@ cd antigravity-codex-bridge
 ```mermaid
 flowchart LR
     U["👤 用户 (大白话提目标 / 做决策)"] -->|"1. 口述目标"| AGY["🧭 Antigravity (总工翻译与把关)"]
-    AGY -->|"2. 严谨技术指令 + 原生 UI 会话"| ENG["📦 Codex Bridge Engine (v1.2.1)"]
+    AGY -->|"2. 严谨技术指令 + 原生 UI 会话"| ENG["📦 Codex Bridge Engine (v1.2.2)"]
     ENG <-->|"JSON-RPC 2.0 (拦截提问/权限/补丁)"| APP["🔌 codex app-server --stdio"]
     APP --> UI["🖥️ Codex Desktop UI (对应 Project 实时同步)"]
     ENG -->|"3. commanderRelay 核验包 + Relay Inbox"| AGY

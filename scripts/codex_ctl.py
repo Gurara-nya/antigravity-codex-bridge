@@ -106,6 +106,12 @@ def main() -> int:
     p_disp.add_argument("--image", action="append", default=[], help="Attach local image path (repeatable)")
     p_disp.add_argument("--output-schema", default=None, help="Optional JSON Schema file path to constrain Codex output")
     p_disp.add_argument("--ack-relay", action="store_true", help="Mark relay item acknowledged immediately (when caller relays inline)")
+    p_disp.add_argument(
+        "--on-lock",
+        choices=["auto-fork", "fail"],
+        default="auto-fork",
+        help="When `--thread` is locked by Codex Desktop (`already has an active writer`), seamlessly auto-fork full context (default) or fail",
+    )
     p_disp.add_argument("--out", "-o", default=None)
     p_disp.add_argument("--prompt", default=None)
     p_disp.add_argument("--prompt-file", default=None)
@@ -259,6 +265,7 @@ def main() -> int:
             output_schema=schema_obj,
             output_file=args.out,
             auto_ack_relay=args.ack_relay,
+            on_lock=args.on_lock,
             on_progress=progress,
         )
         _print_json(res)

@@ -354,7 +354,7 @@ def main() -> None:
                 res = {
                     "protocolVersion": proto,
                     "capabilities": {"tools": {}},
-                    "serverInfo": {"name": "codex-bridge", "version": "1.2.1"},
+                    "serverInfo": {"name": "codex-bridge", "version": "1.2.2"},
                 }
                 _write_message({"jsonrpc": "2.0", "id": req_id, "result": res}, use_content_length)
             elif method == "ping":

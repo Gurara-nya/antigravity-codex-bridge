@@ -986,6 +986,55 @@ def _extract_message_text(content: Any) -> str:
     return ""
 
 
+def normalize_thread_ref(raw: str) -> str:
+    """Normalize a raw thread reference (`codex://threads/<uuid>`, full UUID, or short prefix)."""
+    s = (raw or "").strip()
+    m = re.search(r"([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})", s)
+    if m:
+        return m.group(1).lower()
+    if s.lower().startswith("codex://threads/"):
+        s = s[len("codex://threads/") :].strip("/ ")
+    return s
+
+
+def is_rollout_turn_active(rollout_path: Optional[str | pathlib.Path], max_stale_sec: float = 1800.0) -> bool:
+    """Return True if the rollout JSONL shows an in-flight turn (`task_started` without `task_complete`/`turn_aborted`)."""
+    if not rollout_path:
+        return False
+    p = pathlib.Path(rollout_path)
+    if not p.is_file():
+        return False
+    try:
+        if (time.time() - p.stat().st_mtime) > max_stale_sec:
+            return False
+        last_lifecycle: Optional[str] = None
+        with p.open("r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                if '"event_msg"' not in line:
+                    continue
+                try:
+                    ev = json.loads(line)
+                except Exception:
+                    continue
+                if ev.get("type") == "event_msg" and isinstance(ev.get("payload"), dict):
+                    pt = ev["payload"].get("type")
+                    if pt in ("task_started", "task_complete", "turn_aborted"):
+                        last_lifecycle = pt
+        return last_lifecycle == "task_started"
+    except Exception:
+        return False
+
+
+def _is_active_writer_lock_error(exc: BaseException) -> bool:
+    msg = str(exc).lower()
+    return "already has an active writer" in msg or "active writer" in msg or "thread-writer-locks" in msg
+
+
+def _clean_continuation_title(orig_title: str) -> str:
+    cleaned = re.sub(r"^(?:(?:\[AGY\s*续\]|\[AGY\s*Fork\]|\[Fork\])\s*)+", "", (orig_title or "").strip(), flags=re.IGNORECASE)
+    return cleaned or "(Untitled)"
+
+
 def read_thread(
     thread_id: str,
     max_messages: int = 20,
@@ -996,7 +1045,7 @@ def read_thread(
     con = _open_ro_db()
     try:
         cur = con.cursor()
-        q_tid = thread_id.strip()
+        q_tid = normalize_thread_ref(thread_id)
         row = cur.execute("SELECT * FROM threads WHERE id = ?", (q_tid,)).fetchone()
         if not row:
             row = cur.execute(
@@ -1102,6 +1151,7 @@ def read_thread(
         "createdAt": fmt_ts(row["created_at_ms"]),
         "updatedAt": fmt_ts(row["updated_at_ms"]),
         "rolloutPath": str(rollout_path) if rollout_path else None,
+        "turnActive": is_rollout_turn_active(rollout_path),
         "totalMessages": len(messages),
         "totalToolCalls": len(commands),
         "recentMessages": messages[-max_messages:],
@@ -1771,11 +1821,14 @@ def dispatch_task(
     output_schema: Optional[dict[str, Any]] = None,
     output_file: Optional[str] = None,
     auto_ack_relay: bool = False,
+    on_lock: str = "auto-fork",
+    wait_active_turn_sec: float = 90.0,
     on_progress: Optional[Callable[[str], None]] = None,
 ) -> dict[str, Any]:
     """
     Full native orchestration turn with mandatory Commander Relay packaging:
-    1. Creates, forks, or resumes a native Codex Desktop UI-visible thread.
+    1. Creates, forks, or resumes a native Codex Desktop UI-visible thread (automatically bypassing
+       Codex Desktop's `already has an active writer` lock via seamless `thread/fork` when `on_lock='auto-fork'`).
     2. Runs the prompt via `codex app-server` (`turn/start`), intercepting mid-turn questions & escalations.
     3. Builds a structured `commanderRelay` verification digest, logs to Relay Inbox, and writes the verbatim `.md` report.
     """
@@ -1791,12 +1844,15 @@ def dispatch_task(
     )
     use_cwd = normalize_fs_path(cwd) if cwd else (resolved.get("cwd") or "")
 
+    auto_forked_from: Optional[str] = None
     with AppServerClient(sandbox_mode=sb_str) as client:
         created_new = False
         if fork_from:
             orig = read_thread(fork_from, max_messages=1, max_commands=0)
             if not use_cwd:
                 use_cwd = orig["cwd"]
+            if not resolved.get("projectId") and use_cwd:
+                resolved = resolve_project(use_cwd)
             res = client.request(
                 "thread/fork",
                 {"threadId": orig["id"], "cwd": use_cwd, "sandbox": sb_str, "approvalPolicy": approval_policy, "ephemeral": False},
@@ -1808,13 +1864,62 @@ def dispatch_task(
             title = auto_title
             created_new = True
         elif thread_id:
-            res = client.request("thread/resume", {"threadId": thread_id.strip()})
-            thread_obj = res.get("thread") or {}
-            tid = thread_obj.get("id") or thread_id.strip()
+            orig = read_thread(thread_id, max_messages=1, max_commands=0)
+            full_tid = orig["id"]
             if not use_cwd:
-                use_cwd = normalize_fs_path(thread_obj.get("cwd")) or str(pathlib.Path.cwd())
-            if title:
-                client.request("thread/name/set", {"threadId": tid, "name": title.strip()})
+                use_cwd = orig["cwd"] or str(pathlib.Path.cwd())
+            if not resolved.get("projectId") and use_cwd:
+                resolved = resolve_project(use_cwd)
+
+            rpath = orig.get("rolloutPath")
+            if rpath and wait_active_turn_sec > 0 and is_rollout_turn_active(rpath):
+                if on_progress:
+                    on_progress(
+                        f"[Codex Session] Thread {full_tid[:8]} has an active turn running; "
+                        f"waiting up to {int(wait_active_turn_sec)}s for turn completion..."
+                    )
+                deadline = time.time() + wait_active_turn_sec
+                while time.time() < deadline and is_rollout_turn_active(rpath):
+                    time.sleep(2.0)
+
+            try:
+                res = client.request("thread/resume", {"threadId": full_tid})
+                thread_obj = res.get("thread") or {}
+                tid = thread_obj.get("id") or full_tid
+                if not use_cwd:
+                    use_cwd = normalize_fs_path(thread_obj.get("cwd")) or str(pathlib.Path.cwd())
+                if title:
+                    client.request("thread/name/set", {"threadId": tid, "name": title.strip()})
+                else:
+                    title = orig.get("title")
+            except Exception as resume_err:
+                if on_lock == "fail" or not _is_active_writer_lock_error(resume_err):
+                    raise
+                if on_progress:
+                    on_progress(
+                        f"[Codex Lock Bypass] Thread {full_tid[:8]} is locked by Codex Desktop UI (`active writer`); "
+                        f"auto-forking 100% of context into an unlocked continuation session..."
+                    )
+                res = client.request(
+                    "thread/fork",
+                    {
+                        "threadId": full_tid,
+                        "cwd": use_cwd,
+                        "sandbox": sb_str,
+                        "approvalPolicy": approval_policy,
+                        "ephemeral": False,
+                    },
+                )
+                thread_obj = res.get("thread") or {}
+                tid = thread_obj.get("id")
+                if not tid:
+                    raise RuntimeError(f"Auto-fork fallback returned no thread ID: {res}") from resume_err
+                base_t = _clean_continuation_title(orig.get("title") or prompt.strip().splitlines()[0][:36])
+                auto_title = (title or f"[AGY 续] {base_t[:42]}").strip()
+                client.request("thread/name/set", {"threadId": tid, "name": auto_title})
+                title = auto_title
+                created_new = True
+                auto_forked_from = full_tid
         else:
             created_new = True
             if not use_cwd or not pathlib.Path(use_cwd).is_dir():
@@ -1897,6 +2002,11 @@ def dispatch_task(
             f"- **Title**: {title or '(continued session)'}",
             f"- **Project**: {resolved.get('projectName') or 'Auto/Directory'} (`{use_cwd}`)",
             f"- **Thread UUID**: `{tid}` (Native Codex Desktop UI visible: `source=vscode`)",
+            *(
+                [f"- **Auto-Forked From Desktop-Locked Thread**: `{auto_forked_from}` (100% context preserved seamlessly)"]
+                if auto_forked_from
+                else []
+            ),
             f"- **Model**: `{res.get('model') or model or 'default'}` | **Sandbox**: `{sb_str}` | **Duration**: `{elapsed_sec}s`",
             f"- **Turn Status**: `{turn_out['turnStatus']}` | **Relay Outcome**: `{relay['outcome']}`",
             "",
@@ -1921,6 +2031,7 @@ def dispatch_task(
     )
     raw_md_path.write_text(md_report, encoding="utf-8")
 
+    relay["autoForkedFrom"] = auto_forked_from
     relay_id = enqueue_relay_item(relay, turn_out["finalReply"] or "")
     if auto_ack_relay:
         check_relay_inbox(ack_ids=[relay_id], detect_external_ui_turns=False)
@@ -1930,6 +2041,7 @@ def dispatch_task(
         "timestamp": dt.datetime.now().isoformat(timespec="seconds"),
         "relayId": relay_id,
         "threadId": tid,
+        "autoForkedFrom": auto_forked_from,
         "createdNew": created_new,
         "title": title,
         "projectName": resolved.get("projectName"),
